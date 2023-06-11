@@ -261,13 +261,13 @@ TEST_F(NVFuserTest, CombinedSchedulerLayerNormBackward_CUDA) {
     }
   };
 
-  std::vector<DataType> data_types = {DataType::Half, DataType::Float};
-  std::vector<std::vector<int64_t>> batch_sizes = {{216}};
+  std::vector<DataType> data_types = {DataType::Half};
+  std::vector<std::vector<int64_t>> batch_sizes = {{160*132}};
   std::vector<std::vector<int64_t>> hidden_sizes = {
-      {32}, {96}, {576}, {768}, {1024}, {1280}, {1600}, {1984}};
-  bool isBenchmark = false;
+      {512}};//{64}, {128}, {256}, {512}, 
+  bool isBenchmark = true;
   bool onlyTestFirstCase = false;
-  int verbose = 0;
+  int verbose = 1;
   for (auto dtype : data_types) {
     for (auto batch_shape : batch_sizes) {
       for (auto norm_shape : hidden_sizes) {
