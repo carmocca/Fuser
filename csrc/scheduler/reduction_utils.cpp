@@ -241,7 +241,16 @@ TensorView* scheduleReductionTV(
             rparams.static_bdimx, "blockDim.x must be static");
         inner_parallel_static(
             iter_axis, rparams.block_dim_iter_dom, rparams.lparams.bdimx());
-      } else {
+      }
+      else if(rparams.combined_inner_outer && rparams.multiple_reds_per_blk){
+        TORCH_INTERNAL_ASSERT(
+            rparams.lparams.bdimy() > 0 && 
+            rparams.block_dim_iter_dom == ParallelType::TIDy,
+            "blockDim.y must be static and block_dim_iter_dom must be TIDy.");
+        inner_parallel_static(
+            iter_axis, rparams.block_dim_iter_dom, rparams.lparams.bdimy());
+      }
+      else {
         inner_parallel(iter_axis, rparams.block_dim_iter_dom);
       }
     }

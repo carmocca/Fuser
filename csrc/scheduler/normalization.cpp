@@ -1587,8 +1587,10 @@ void scheduleReductionCombinedOuter(
     mergeReductionOrIterDomains(outer_reduction_tv, true);
     mergeReductionOrIterDomains(outer_reduction_tv, false);
     if (rparams.multiple_reds_per_blk) {
-      outer_reduction_tv->split(
-          0, NamedScalar::getParallelDim(rparams.block_dim_iter_dom));
+      // outer_reduction_tv->split(
+      //     0, NamedScalar::getParallelDim(rparams.block_dim_iter_dom));
+      // already checked bdimy() in reduction_scheduler_utils::scheduleReductionTV
+      outer_reduction_tv->split(0, rparams.lparams.bdimy());          
     }
     outer_reduction_tv->split(
         0, NamedScalar::getParallelDim(rparams.grid_dim_iter_dom), false);
@@ -1740,8 +1742,10 @@ void schedulePersistentKernelInnerOuter(
 
   // Propagate inner reduction. There is a cutoff at boundaryNodesSet, so this
   // propagation will not propagate to the final outer reduction.
+  std::cout << "propagateTransformation inner_reference_tv: " << inner_reference_tv << std::endl;
   reduction_scheduler_utils::propagateTransformation(
       inner_reference_tv, boundaryNodesSet);
+  std::cout << "propagateRFactor inner_reduction_tvs: " << inner_reduction_tvs[0] << std::endl;
   reduction_scheduler_utils::propagateRFactor(
       inner_reference_tv, inner_reduction_tvs[0], inner_reduction_tvs);
 
@@ -1770,6 +1774,7 @@ void schedulePersistentKernelInnerOuter(
   for (long unsigned int i = 0; i < outer_reference_tvs.size(); i++) {
     const auto& selected_tvs_outer = scheduler_utils::getAllTvsFrom(
         {outer_reduction_tvs[i]}, {cached_gmem[i]});
+  std::cout << "propagateTransformation outer_reference_tvs: " << outer_reference_tvs[i] << std::endl;
     reduction_scheduler_utils::propagateTransformation(
         outer_reference_tvs[i], boundaryNodesSet);
     reduction_scheduler_utils::propagateParallelization(

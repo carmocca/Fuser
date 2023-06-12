@@ -262,10 +262,10 @@ TEST_F(NVFuserTest, CombinedSchedulerLayerNormBackward_CUDA) {
   };
 
   std::vector<DataType> data_types = {DataType::Half};
-  std::vector<std::vector<int64_t>> batch_sizes = {{160*132}};
+  std::vector<std::vector<int64_t>> batch_sizes = {{132*108}};
   std::vector<std::vector<int64_t>> hidden_sizes = {
       {512}};//{64}, {128}, {256}, {512}, 
-  bool isBenchmark = true;
+  bool isBenchmark = false;
   bool onlyTestFirstCase = false;
   int verbose = 1;
   for (auto dtype : data_types) {
@@ -828,20 +828,21 @@ TEST_F(NVFuserTest, CombinedReduction_CUDA) {
 // Manual schedule of inner and outer reduction on the same tensor. Each block
 // will do multiple reductions.
 TEST_F(NVFuserTest, CombinedReductionMultiPerBlock_CUDA) {
-  auto ceilDiv = [](const int a, const int b) { return (a + b - 1) / b; };
-  constexpr bool verbose = false;
+  // auto ceilDiv = [](const int a, const int b) { return (a + b - 1) / b; };
+  constexpr bool verbose = true;
   const auto dev_prop = at::cuda::getCurrentDeviceProperties();
   // avoid future architecture with too many SMs
   // then we don't have enough parallelism to split out.
   const int64_t device_multiprocessor_count =
       std::min(dev_prop->multiProcessorCount, 128);
-  const int dim0 = 216;
-  const int dim1 = 1024;
+  const int threads_per_block = 512;
+  const int dim0 = 20480;
+  const int dim1 = 256;
   const int bidy = 2 * device_multiprocessor_count;
   const int vecx = 4;
-  const int nloadx = 8;
+  const int nloadx = 1;
   const int tidx = dim1 / vecx / nloadx;
-  const int tidy = ceilDiv(dim1, bidy);
+  const int tidy = threads_per_block / tidx;//ceilDiv(dim1, bidy);
   // https://github.com/csarofeen/pytorch/issues/2458
   const bool swap_xy = true;
 
