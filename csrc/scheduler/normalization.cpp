@@ -202,11 +202,11 @@ std::shared_ptr<ReductionParams> innerOuterPersistentHeuristic(
     // iop.bdimy = std::min(
     //     ceilDiv(inner_dim_numel / iop.vectorization_factor_outer, iop.gdimy),
     //     scheduler_utils::safeDiv(threads_per_block_mrpb, iop.bdimx));
-    iop.bdimy = scheduler_utils::safeDiv(threads_per_block_mrpb, iop.bdimx);
+    iop.bdimy = std::min(ceilDiv(outer_dim_numel,iop.gdimy),scheduler_utils::safeDiv(threads_per_block_mrpb, iop.bdimx));
 
     // Step-4, OuterParams, Reduction dim: bdimx (already done)
 
-    if (iop.bdimx % dev_prop->warpSize == 0) {
+    if (iop.bdimx % dev_prop->warpSize == 0 && iop.bdimy == 1) {
       rparams->pad_inner_reduction_to_warp = true;
       rparams->pad_outer_reduction_to_warp = true;
     }
