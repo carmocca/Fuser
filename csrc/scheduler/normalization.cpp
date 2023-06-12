@@ -184,6 +184,12 @@ std::shared_ptr<ReductionParams> innerOuterPersistentHeuristic(
     // Step-2, InnerParams, Iteration dim: gdimy, bdimy (in next step)
     reg_per_thread =
         getEstimatedRegisterUsage(iop.inner_vect * iop.inner_batch);
+        std::cout << "reg_per_thread= " << reg_per_thread << std::endl;
+    // reduce to 64, then we can have 2 blocks per sm
+    // but don't reduce too much to avoid register spills
+    if(reg_per_thread > 64 && reg_per_thread <= 68) {
+      reg_per_thread = 64;
+    }
     threads_per_sm = getThreadsPerSMGivenRegPerThread(reg_per_thread);
     blocks_per_sm = getBlocksPerSM(
         threads_per_sm, threads_per_block_mrpb, dev_prop->warpSize);
