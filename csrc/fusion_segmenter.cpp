@@ -2537,17 +2537,17 @@ class CombineReductions {
         }
       }
     }
-    auto printGroups = [](std::string title, SegmentedFusion* sf) {
-      std::cout << "==== checking at level: " << title << std::endl;
-      sf->completeFusion()->printMath();
-      for (auto sg : sf->groups()) {
-        sg->print();
-      }
-      std::cout << "check for cycle" << std::endl;
-      sf->validateDAG();
-      std::cout << "print fusion" << std::endl;
-      sf->print();
-    };
+    // auto printGroups = [](std::string title, SegmentedFusion* sf) {
+    //   std::cout << "==== checking at level: " << title << std::endl;
+    //   sf->completeFusion()->printMath();
+    //   for (auto sg : sf->groups()) {
+    //     sg->print();
+    //   }
+    //   std::cout << "check for cycle" << std::endl;
+    //   sf->validateDAG();
+    //   std::cout << "print fusion" << std::endl;
+    //   sf->print();
+    // };
 
 
     // Keep trying to merge groups with compatible reductions and compatible
@@ -2588,7 +2588,11 @@ class CombineReductions {
             continue;
           }
 
-          printGroups("check before merging", segment_candidate_finder_->segmented_fusion_.get());
+          // printGroups("check before merging", segment_candidate_finder_->segmented_fusion_.get());
+    std::cout << "check for cycle before merging" << std::endl;
+    segment_candidate_finder_->segmented_fusion_->validateDAG();
+    std::cout << "check passed" << std::endl;
+
           // first try a vertical merge
           merged_groups =
               verticalReductionMerge(first_group, second_group) != nullptr;
@@ -2596,9 +2600,15 @@ class CombineReductions {
             // vertical merge didn't happen, try a horizontal merge
             merged_groups =
                 horizontalReductionMerge(first_group, second_group) != nullptr;
-            printGroups("check horizontal merging", segment_candidate_finder_->segmented_fusion_.get());
+            // printGroups("check horizontal merging", segment_candidate_finder_->segmented_fusion_.get());
+    std::cout << "check for cycle after horizontal merging" << std::endl;
+    segment_candidate_finder_->segmented_fusion_->validateDAG();
+    std::cout << "check passed" << std::endl;
           } else {
-            printGroups("check vertical merging", segment_candidate_finder_->segmented_fusion_.get());
+            // printGroups("check vertical merging", segment_candidate_finder_->segmented_fusion_.get());
+    std::cout << "check for cycle after vertical merging" << std::endl;
+    segment_candidate_finder_->segmented_fusion_->validateDAG();
+    std::cout << "check passed" << std::endl;
           }
         }
       }
