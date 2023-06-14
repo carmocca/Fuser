@@ -393,7 +393,7 @@ class TORCH_CUDA_CU_API SegmentedFusion {
   //! Same as validate but only enabled when NDEBUG is undefined
   void validateIfDebug(bool require_disjoint = true) const;
 
- private:
+ public:
   void validateDAG() const;
   void validateDisjoint() const;
 

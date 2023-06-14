@@ -2537,6 +2537,18 @@ class CombineReductions {
         }
       }
     }
+    auto printGroups = [](std::string title, SegmentedFusion* sf) {
+      std::cout << "==== checking at level: " << title << std::endl;
+      sf->completeFusion()->printMath();
+      for (auto sg : sf->groups()) {
+        sg->print();
+      }
+      std::cout << "check for cycle" << std::endl;
+      sf->validateDAG();
+      std::cout << "print fusion" << std::endl;
+      sf->print();
+    };
+
 
     // Keep trying to merge groups with compatible reductions and compatible
     // paths
@@ -2576,6 +2588,7 @@ class CombineReductions {
             continue;
           }
 
+          printGroups("check before merging", segment_candidate_finder_->segmented_fusion_.get());
           // first try a vertical merge
           merged_groups =
               verticalReductionMerge(first_group, second_group) != nullptr;
@@ -2583,6 +2596,9 @@ class CombineReductions {
             // vertical merge didn't happen, try a horizontal merge
             merged_groups =
                 horizontalReductionMerge(first_group, second_group) != nullptr;
+            printGroups("check horizontal merging", segment_candidate_finder_->segmented_fusion_.get());
+          } else {
+            printGroups("check vertical merging", segment_candidate_finder_->segmented_fusion_.get());
           }
         }
       }
@@ -3275,6 +3291,17 @@ void SegmentCandidateFinder::trySetUpMerge(
 
 void SegmentCandidateFinder::findSegments() {
   FUSER_PERF_SCOPE("Finding valid fusion segment solutions");
+  auto printGroups = [](std::string title, SegmentedFusion* sf) {
+    std::cout << "==== checking at level: " << title << std::endl;
+    sf->completeFusion()->printMath();
+    for (auto sg : sf->groups()) {
+      sg->print();
+    }
+    std::cout << "check for cycle" << std::endl;
+    sf->validateDAG();
+    std::cout << "print fusion" << std::endl;
+    sf->print();
+  };
 
   buildInitialSegments();
 
@@ -3308,9 +3335,11 @@ void SegmentCandidateFinder::findSegments() {
   removeScalarEdges();
 
   // Run pre-merge heuristics
+  printGroups("check before CombineReductions", segmented_fusion_.get());
   if (options_.run_combine_reductions && CombineReductions::shouldRun(this)) {
     CombineReductions::run(this);
   }
+  printGroups("check after CombineReductions", segmented_fusion_.get());
 
   segmented_fusion_->validateIfDebug();
 
