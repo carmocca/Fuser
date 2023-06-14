@@ -1134,7 +1134,7 @@ std::cout << "valuesBetween: " << std::endl;
 std::cout << "looking at :";
 producer_of_consumer->print();
       if (known_producers_of_.at(producer_of_consumer)->has(producer)) {
-	std::cout << "added to values"
+	std::cout << "added to values";
         values_between.pushBack(producer_of_consumer);
       }
     }
@@ -1309,6 +1309,8 @@ void GroupDependencyAnalysis::mergeGroups(
       }
       // insert the new group as producer
       it.second->pushBack(merged);
+      // all producers of merged are now producers of `it`
+      mergeAllKnownProducersIntoFrom(it.first, merged);
     }
   }
 }
