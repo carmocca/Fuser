@@ -1122,6 +1122,8 @@ class GroupDependencyAnalysis : public NonCopyable, public SegmenterAnalysis {
       return {};
     }
 
+std::cout << "valuesBetween: " << std::endl;
+
     GroupSet values_between;
     auto& all_producers_of_consumer = known_producers_of_.at(consumer);
     TORCH_INTERNAL_ASSERT(
@@ -1129,7 +1131,10 @@ class GroupDependencyAnalysis : public NonCopyable, public SegmenterAnalysis {
         "Fusion segment: Trying to compute path between two nodes that are not producer-consumer pairs");
 
     for (auto producer_of_consumer : *all_producers_of_consumer) {
+std::cout << "looking at :";
+producer_of_consumer->print();
       if (known_producers_of_.at(producer_of_consumer)->has(producer)) {
+	std::cout << "added to values"
         values_between.pushBack(producer_of_consumer);
       }
     }
@@ -2658,6 +2663,10 @@ class CombineReductions {
       return nullptr;
     }
 
+    std::cout << "producer: ";
+    producer->print();
+    std::cout << "consumer: ";
+    consumer->print();
     // Collect all groups that we need to merge along with the producer and
     // consumer
     auto all_groups_to_merge =
