@@ -2593,6 +2593,9 @@ class CombineReductions {
     segment_candidate_finder_->segmented_fusion_->validateDAG();
     std::cout << "check passed" << std::endl;
 
+    std::cout << "checking first group\n" << std::endl;
+    first_group->print();
+    second_group->print();
           // first try a vertical merge
           merged_groups =
               verticalReductionMerge(first_group, second_group) != nullptr;
@@ -2659,6 +2662,11 @@ class CombineReductions {
     // consumer
     auto all_groups_to_merge =
         getValidMinVerticalMergedGroupSet(producer, consumer);
+
+std::cout << "all groups to merge" << std::endl;
+for (auto group : all_groups_to_merge) {
+  group->print();
+}
 
     if (all_groups_to_merge.empty()) {
       // The vertical paths from producer to consumer have in-compatible
@@ -2866,10 +2874,16 @@ class CombineReductions {
       return {maybe_consumer};
     } else if (dependency_analysis->isConsumerOf(
                    maybe_consumer, maybe_producer)) {
+// where is cycle check happening here?!?!
       auto groups_to_check =
           dependency_analysis->valuesBetween(maybe_producer, maybe_consumer);
       groups_to_check.pushBack(maybe_producer);
       groups_to_check.pushBack(maybe_consumer);
+
+std::cout << "get valid min vertical merged group set" << std::endl;
+for (auto group : groups_to_check) {
+  group->print();
+}
 
       // Check that either no group has a reduction or all groups have the same
       // reduction signature
