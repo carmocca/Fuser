@@ -219,6 +219,21 @@ NVFUSER_BENCHMARK_RUN(NvFuserScheduler_LayerNorm_BWD_fp32)
     ->UseManualTime();
 
 NVFUSER_BENCHMARK_DEFINE(
+    NvFuserScheduler_LayerNorm_BWD_Project_fp32,
+    setupLayerNorm_BWD,
+    NvFuserScheduler_LayerNorm_BWD,
+    DataType::Float);
+// For these cases, persistent buffers should be projected to input to achieve
+// better performance
+NVFUSER_BENCHMARK_RUN(NvFuserScheduler_LayerNorm_BWD_Project_fp32)
+    ->Args({8 * 1024, 8192})
+    ->Args({8 * 1024, 10240})
+    ->Args({8 * 1024, 12288})
+    ->Args({8 * 1024, 14336})
+    ->Unit(benchmark::kMicrosecond)
+    ->UseManualTime();
+
+NVFUSER_BENCHMARK_DEFINE(
     NvFuserScheduler_LayerNorm_BWD_fp16,
     setupLayerNorm_BWD,
     NvFuserScheduler_LayerNorm_BWD,
