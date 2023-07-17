@@ -7255,8 +7255,8 @@ TEST_F(
   Scalar* eps_ptr = IrBuilder::create<Scalar>(kEps);
 
   DataType dtype = DataType::Half;
-  constexpr int64_t dim0 = 2048;
-  constexpr int64_t dim1 = 10240;
+  constexpr int64_t dim0 = 32*1024;
+  constexpr int64_t dim1 = 1280;
   std::vector<int64_t> input_shape{dim0, dim1};
   std::vector<int64_t> norm_shape{dim1};
   auto input_half = makeContigTensor(2, dtype);

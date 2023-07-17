@@ -26,6 +26,9 @@
 #include <ATen/cuda/CUDAContext.h>
 
 #include <cmath>
+#include <queue>
+
+#define NEW_CHANGE 10
 
 namespace nvfuser {
 
@@ -740,13 +743,31 @@ std::shared_ptr<ReductionParams> innerPersistentHeuristic(
     }
   }
 
+
+  
+
+
+
+
   // Will be used once supporting inter-block persistence
   int64_t gdimx = LaunchParams::UNINITIALIZED_VAL;
   int64_t gdimy = LaunchParams::UNINITIALIZED_VAL;
   int64_t gdimz = LaunchParams::UNINITIALIZED_VAL;
 
   auto rparams = std::make_shared<ReductionParams>();
-
+  #if NEW_CHANGE
+  // check block per sm to launch grid persistent kernel
+  int64_t threads_per_sm = getThreadsPerSMGivenRegPerThread(nvrtc_register_per_thread);
+  int64_t threads_per_block = pad_bdimx ? padded_bdimx * bdimy * bdimz : bdimx * bdimy * bdimz;
+  int64_t blocks_per_sm = threads_per_sm / threads_per_block;
+  gdimx = blocks_per_sm * device_multiprocessor_count;  
+  rparams->split_grid_dim_iter_dom_outer = true;
+  rparams->grid_dim_iter_dom = ParallelType::BIDx;
+  #else
+  if (godim > 1) {
+    rparams->grid_dim_iter_dom = ParallelType::BIDx;
+  }
+  #endif
   rparams->cparams.maxrregcount = (int)nvrtc_register_per_thread;
   rparams->persistent_kernel = true;
   rparams->fastest_dim = true;
@@ -769,13 +790,6 @@ std::shared_ptr<ReductionParams> innerPersistentHeuristic(
     rparams->block_dim_iter_dom = ParallelType::TIDy;
   }
 
-  if (godim > 1) {
-    rparams->grid_dim_iter_dom = ParallelType::BIDx;
-    if (godim > scheduler_utils::x_grid_limit) {
-      rparams->split_grid_dim_iter_dom_outer = true;
-      gdimx = scheduler_utils::x_grid_limit;
-    }
-  }
 
   if (iter_unroll_factor > 1) {
     rparams->unroll_factor_iter_dom = iter_unroll_factor;
@@ -1479,6 +1493,8 @@ void beforeSchedule(
   scheduler_utils::clearMemorySpace(fusion);
   scheduler_utils::prepareForMemoryTypePromotion(fusion);
   reduction_tvs = scheduler_utils::getReductionTvs(fusion);
+
+
 }
 
 // If called from schedulePersistentKernel, reduction_tvs are either inner
@@ -1529,6 +1545,145 @@ TensorView* scheduleReductionGeneral(
   return reduction_scheduler_utils::scheduleReductionTV(
       rparams, reduction_tv, has_iter_axis);
 }
+
+namespace {
+
+// Find leaf IDs that have broadcast IDs merged into
+std::vector<IterDomain*> getBroadcastLeafCAIds(TensorView* broadcast_tv) {
+  BroadcastOp* broadcast =
+      dynamic_cast<BroadcastOp*>(broadcast_tv->definition());
+  TORCH_INTERNAL_ASSERT(broadcast != nullptr);
+
+  std::unordered_set<Val*> root_broadcast_ids;
+  for (const auto i : c10::irange(broadcast_tv->getRootDomain().size())) {
+    if (broadcast->isBroadcastDim(i)) {
+      root_broadcast_ids.insert(broadcast_tv->getRootDomain().at(i));
+    }
+  }
+  auto broadcast_ids = DependencyCheck::getAllValsBetween(
+      root_broadcast_ids,
+      std::vector<Val*>(
+          broadcast_tv->getLeafDomain().begin(),
+          broadcast_tv->getLeafDomain().end()));
+
+  std::vector<IterDomain*> broadcast_leaf_ca_ids;
+  std::copy_if(
+      broadcast_tv->getLeafDomain().begin(),
+      broadcast_tv->getLeafDomain().begin() +
+          broadcast_tv->getComputeAtPosition(),
+      std::back_inserter(broadcast_leaf_ca_ids),
+      [&](auto id) {
+        return std::find(broadcast_ids.begin(), broadcast_ids.end(), id) !=
+            broadcast_ids.end();
+      });
+  return broadcast_leaf_ca_ids;
+}
+
+void avoidRedundantInputReads(
+    Fusion* fusion,
+    const std::vector<TensorView*>& cached_inputs) {
+  ComputeAtMap ca_map(fusion);
+  for (auto cached_input : cached_inputs) {
+    int64_t cached_input_ca_pos = cached_input->getComputeAtPosition();
+    // If it's already 0, no further adjustent is necessary
+    if (cached_input->getComputeAtPosition() == 0) {
+      continue;
+    }
+
+    // Check all dependent broadcast exprs
+    auto dep_exprs =
+        DependencyCheck::getAllExprsBetween({cached_input}, fusion->outputs());
+    for (auto broadcast : ir_utils::filterByType<BroadcastOp>(dep_exprs)) {
+      auto broadcast_tv = broadcast->output(0)->as<TensorView>();
+      const auto broadcast_leaf_ca_ids = getBroadcastLeafCAIds(broadcast_tv);
+      if (broadcast_leaf_ca_ids.empty()) {
+        continue;
+      }
+
+      // Look for a broadcast leaf CA ID that is expanded. Such IDs
+      // are executed redundantly. Note that the goal here is to avoid
+      // redundant loads by caching them in registers, so we only
+      // consider the redundancy within a thread, so if it's
+      // parallelized, it should be ignored.
+      //
+      // This analysis is similar to broadcast concretization as
+      // well as the thread predicate analysis. We could likely clean
+      // up with the new ID Graph facility.
+      const auto expanded_broadcast_leaf_it = std::find_if(
+          broadcast_leaf_ca_ids.begin(),
+          broadcast_leaf_ca_ids.end(),
+          [&ca_map](auto broadcast_leaf_ca_id) {
+            auto loop_concrete_id = ca_map.getConcreteMappedID(
+                broadcast_leaf_ca_id, IdMappingMode::LOOP);
+            // If it is exaclty mapped with the LOOP
+            // concrete ID, there's no redundancy
+            if (ca_map.areMapped(
+                    broadcast_leaf_ca_id,
+                    loop_concrete_id,
+                    IdMappingMode::EXACT)) {
+              return false;
+            }
+            if (isParallelTypeThread(loop_concrete_id->getParallelType())) {
+              return false;
+            }
+            return true;
+          });
+
+      // This broadcast does not cause any intra-thread
+      // redundancy. No need to adjust the CA position
+      if (expanded_broadcast_leaf_it == broadcast_leaf_ca_ids.end()) {
+        continue;
+      }
+
+      // Now that we found an expanded broadcast leaf ID, check if any
+      // of the leaf IDs of the cached inputs are inlined at or right of
+      // the expanded broadcast leaf ID. If there's one, the input
+      // would be redundantly loaded.
+      const auto expanded_broadcast_leaf_dim = std::distance(
+          broadcast_tv->getLeafDomain().begin(),
+          std::find(
+              broadcast_tv->getLeafDomain().begin(),
+              broadcast_tv->getLeafDomain().end(),
+              *expanded_broadcast_leaf_it));
+
+      const auto cached_input_mapped_leaf_id_it = std::find_if(
+          cached_input->getLeafDomain().begin(),
+          cached_input->getLeafDomain().end(),
+          [&](auto cached_input_leaf_id) {
+            return std::any_of(
+                broadcast_tv->getLeafDomain().begin() +
+                    expanded_broadcast_leaf_dim,
+                broadcast_tv->getLeafDomain().end(),
+                [&](auto broadcast_tv_leaf_id) {
+                  return ca_map.areMapped(
+                      broadcast_tv_leaf_id,
+                      cached_input_leaf_id,
+                      IdMappingMode::LOOP);
+                });
+          });
+      if (cached_input_mapped_leaf_id_it ==
+          cached_input->getLeafDomain().end()) {
+        continue;
+      }
+
+      // We need to make sure the CA position is left of
+      // cached_input_mapped_leaf_id_it
+      const int64_t cached_input_redundant_id_dim = std::distance(
+          cached_input->getLeafDomain().begin(),
+          cached_input_mapped_leaf_id_it);
+      cached_input_ca_pos =
+          std::min(cached_input_ca_pos, cached_input_redundant_id_dim);
+    }
+
+    if (cached_input_ca_pos < cached_input->getComputeAtPosition()) {
+      std::cerr << "Lowering CA position of input " << cached_input->toString()
+                << " to " << cached_input_ca_pos << std::endl;
+      cached_input->inlineAt(cached_input_ca_pos, false, nullptr, true);
+    }
+  }
+}
+
+} // namespace
 
 // fusion is the input IR that will be modified by this function
 void schedulePersistentKernel(Fusion* fusion, const ReductionParams& rparams) {
@@ -1588,8 +1743,47 @@ void schedulePersistentKernel(Fusion* fusion, const ReductionParams& rparams) {
       persistent_buffer->computeWith(-1, true);
     }
   }
+#if NEW_CHANGE
+  for(const auto tv : cached_inputs) {
+    bool used_in_broadcast = false;
+    const auto& consumers = ir_utils::consumerTvsOf(tv);
+    std::queue<TensorView*> q;
+    for(const auto tv : consumers) {
+      std::cout << "checking tv: " << tv->toString() << std::endl;
+      if(tv->hasBroadcast()) {
+        used_in_broadcast = true;
+        break;
+      }else if (!tv->hasReduction()) {
+        q.push(tv);
+      }
+    }
+    if(!used_in_broadcast) {
+      while(!q.empty()){
+        const auto tv = q.front();
+        q.pop();
+        const auto& consumers = ir_utils::consumerTvsOf(tv);
+        for(const auto tv : consumers) {
+          std::cout << "checking tv: " << tv->toString() << std::endl;
+          if(tv->hasBroadcast()) {
+            used_in_broadcast = true;
+            break;
+          }else if (!tv->hasReduction()) {
+            q.push(tv);
+          }
+        }
+      }
+    }
+    if(used_in_broadcast){
+      std::cout << "Warning: " << tv->name() << " is used in broadcast, "
+                << "it is not safe to cache it in register." << std::endl;
+      tv->setMemoryType(MemoryType::Shared);
+    }
+  }
+  avoidRedundantInputReads(fusion, cached_inputs);
+#endif
 
   scheduler_utils::promoteProducerMemoryTypes(fusion, cached_inputs);
+
 }
 
 void scheduleReductionCombinedOuter(
