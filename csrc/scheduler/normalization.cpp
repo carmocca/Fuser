@@ -330,6 +330,240 @@ std::shared_ptr<ReductionParams> innerOuterPersistentHeuristic(
   }
   return rparams;
 }
+
+// Separated from innerPersistentHeuristic.
+// This heuristic only processes cases where all the reduction domains are the
+// consecutive innermost domains,e.g. [I,I,..,I,R,R,..R]. In this case
+// inner_most_dimension_numel == total_reduction_numel
+std::shared_ptr<ReductionParams> pureInnerPersistentHeuristic(
+    const int64_t total_reduction_numel,
+    const int64_t total_iteration_numel,
+    const int64_t inner_most_dimension_numel,
+    const int64_t n_tensor_inputs,
+    const int64_t max_input_dtype_size,
+    const int64_t max_persistent_buffer_size,
+    const size_t vectorize_factor) {
+  const auto dev_prop = at::cuda::getCurrentDeviceProperties();      
+  const int64_t device_warp_size = (int64_t)dev_prop->warpSize;
+  struct HeuristicParams {
+    // Reduction dim, each thread do [batches_per_block * redu_unroll_factor]
+    // serial reductions, then do block reductions along [bdimx].
+    // total_reduction_numel <= bdimx [dynamic] * batches_per_block *
+    // redu_unroll_factor
+    HeuristicParameterWrapper redu_unroll_factor;
+    HeuristicParameterWrapper batches_per_block;
+    HeuristicParameterWrapper bdimx;
+
+    // Iteration dim, bdimy and godim, each CTA process bdimy reductions
+    HeuristicParameterWrapper iter_unroll_factor;
+    HeuristicParameterWrapper godim;
+    HeuristicParameterWrapper bdimy;
+
+    HeuristicParameterWrapper nvrtc_register_per_thread;
+    void verify() {
+      TORCH_INTERNAL_ASSERT(!bdimx.isMutable(), "bdimx is not finalized.");
+      TORCH_INTERNAL_ASSERT(!bdimy.isMutable(), "bdimy is not finalized.");
+      TORCH_INTERNAL_ASSERT(!nvrtc_register_per_thread.isMutable(), "nvrtc_register_per_thread is not finalized.");
+      TORCH_INTERNAL_ASSERT(
+          !redu_unroll_factor.isMutable(),
+          "redu_unroll_factor is not finalized.");
+      TORCH_INTERNAL_ASSERT(
+          !batches_per_block.isMutable(),
+          "batches_per_block is not finalized.");
+      TORCH_INTERNAL_ASSERT(
+          !godim.isMutable(),
+          "godim is not finalized.");      
+    }
+  };
+  HeuristicParams hp;
+  //! Each thread can use a maximum of 255 registers, and assume 40 of them are
+  //! reserved for indexing and other purposes. So, each thread can use up to
+  //! 215 registers for persistent buffer. Calculate number of buffer batches
+  //! using these 215 registers. total_buffer_bytes is the total size of
+  //! persistent buffers in bytes. reduction_elements is the number of elements
+  //! in the reduction domain. vectorization_factor is the vectorization factor
+  //! of inputs and outputs.
+  auto getMaximumInnerOuterPersistentBufferBatch = [&]() -> int64_t {
+    int64_t register_per_batch = ceilDiv(
+        max_persistent_buffer_size / inner_most_dimension_numel * hp.redu_unroll_factor.get(),
+        scheduler_utils::bytes_per_register);
+    return scheduler_utils::safeDiv(
+        scheduler_utils::max_registers_per_thread -
+            scheduler_utils::register_overhead,
+        register_per_batch);
+  };
+  // prioritize vectorization
+  hp.redu_unroll_factor.set(vectorize_factor);
+  hp.redu_unroll_factor.finalize();
+
+  hp.iter_unroll_factor.set(1l);
+  hp.iter_unroll_factor.finalize();
+
+
+  // split remaining work between batches_per_block and bdimx
+  const int64_t after_vectorization = inner_most_dimension_numel / hp.redu_unroll_factor.get();
+  const int64_t bdimx_min = std::min(after_vectorization, 128l);
+  const int64_t bdimx_max = 512l;//getThreadsPerSMGivenRegPerThread(255l);
+  const int64_t bdimx_step = device_warp_size;
+  const int64_t batch_max = getMaximumInnerOuterPersistentBufferBatch();
+  // const int64_t batch_min = 1l;
+  // Start from the smallest threads_per_block. If the corresponding batch size
+  // is larger than batch_max, try increase threads per block by a warp until
+  // the threads_per_block reaches threads_per_block_max or the batch size
+  // reaches batch_min.
+  auto maybeNextDivisibleFactor =
+      [&after_vectorization, &bdimx_max, &bdimx_step](int64_t cur) {
+        auto next = cur + bdimx_step;
+        while (next <= bdimx_max && after_vectorization % next) {
+          next += bdimx_step;
+        }
+        return std::min(next, bdimx_max);
+      };  
+  int64_t bdimx_tmp = bdimx_min;
+  while (after_vectorization > bdimx_tmp && after_vectorization % bdimx_tmp && bdimx_tmp < bdimx_max) {
+    bdimx_tmp = maybeNextDivisibleFactor(bdimx_tmp);
+  }
+  int64_t inner_batch = ceilDiv(after_vectorization, bdimx_tmp);
+  // We prioritize divisible split, however, this may lead to small bdimx with large inner_batch, e.g. 
+  // bdimx = 128 and inner_batch = 8 for after_vectorization = 1024. Check if we may double bdimx while
+  // still divisible.
+  if(inner_batch >=8 && inner_batch % 2 == 0 && bdimx_tmp * 2 <= bdimx_max){
+    inner_batch /= 2;
+    bdimx_tmp *= 2;
+  }
+  hp.bdimx.set(bdimx_tmp);
+  hp.batches_per_block.set(inner_batch);
+  hp.bdimx.finalize();
+  hp.batches_per_block.finalize();
+
+  int64_t bdimy = 1;
+  int64_t godim = ceilDiv(total_iteration_numel, bdimy);
+  hp.godim.set(godim);
+  hp.godim.finalize();
+  hp.bdimy.set(bdimy);
+  hp.bdimy.finalize();
+
+  hp.nvrtc_register_per_thread.set(255l);
+  // {
+        // Estimate register per thread based on buffer size, since inner reduction
+    // dim is fully parallelized, the buffer size of each element equals the
+    // total buffer size divide by inner_most_dimension_numel. Each thread will
+    // hold batches_per_block_inner_reduction * inner_reduction_unroll_factor
+    // elements.
+    const int64_t persistent_buffer_size = max_persistent_buffer_size /
+        inner_most_dimension_numel * hp.batches_per_block.get() *
+        hp.redu_unroll_factor.get();
+
+    // persistent_buffer_size = 4*2, 8*2, 32*2, 64*2, 128*2
+    // register_used_on_a100  = 27,  40,  62,   73,   105
+    // register_used_on_v100  = xx,  xx,  45,   62,   93
+    // estimated_register_num = 42,  44,  56,   72,   104
+    // safe for both v100 & a100
+    int64_t estimated_register_count =
+        persistent_buffer_size / scheduler_utils::bytes_per_register +
+        scheduler_utils::register_overhead;
+
+    // check occupancy using blocks per sm
+    const int64_t threads_per_block = hp.bdimx.get() * hp.bdimy.get();
+    const int64_t blocks_per_sm_estimated =
+        getThreadsPerSMGivenRegPerThread(estimated_register_count) /
+        threads_per_block;
+    // only allow adjust to 90% of estimated_register_count to avoid too much
+    // spills. initially we used 80%, however, the drop from 160 to 128 leads to
+    // too much spills in Layer Norm with fused ops, see
+    // https://github.com/NVIDIA/Fuser/issues/335
+    // 90% allows edge cases, e.g. 72 to 64 which is important for 32K fp16
+    // where batch = 8. With this change, however, we lost 10 % performance on
+    // Softmax_Inner_fp16/16384/4096, where the perf is best when using 64
+    // registers with 232 bytes spill stores and 276 bytes spill loads. The
+    // estimated register for this case is 104 adjusting it to 64 is too
+    // aggressive.
+    constexpr double max_adjust_fraction = 0.9;
+    int64_t register_count_minimum = static_cast<int64_t>(
+        max_adjust_fraction * static_cast<double>(estimated_register_count));
+    const int64_t blocks_per_sm_maximum =
+        getThreadsPerSMGivenRegPerThread(register_count_minimum) /
+        threads_per_block;
+    register_count_minimum = getRegPerThreadGivenThreadsPerSM(
+        blocks_per_sm_maximum * threads_per_block);
+
+    // minimum occupancy we want to achieve
+    constexpr double occupancy_ratio = 0.4;
+    const int64_t blocks_per_sm_wanted = ceilDiv(
+        static_cast<int64_t>(
+            dev_prop->maxThreadsPerMultiProcessor * occupancy_ratio),
+        threads_per_block);
+    const int64_t register_count_occupancy = getRegPerThreadGivenThreadsPerSM(
+        blocks_per_sm_wanted * threads_per_block);
+    // if estimated blocks is smaller than wanted and decrease register usage
+    // can increase blocks per sm, try to decrease register usage to increase
+    // occupancy but don't go below register_count_minimum
+    // if (blocks_per_sm_estimated < blocks_per_sm_wanted &&
+    //     blocks_per_sm_maximum > blocks_per_sm_estimated) {
+      hp.nvrtc_register_per_thread.set(std::max(register_count_minimum, register_count_occupancy));
+    // }
+  // }
+  hp.nvrtc_register_per_thread.finalize();
+  // save to ReductionParams
+  hp.verify();
+  auto rparams = std::make_shared<ReductionParams>();
+  rparams->persistent_kernel = true;
+  rparams->fastest_dim = true;
+  rparams->cparams.maxrregcount = (int)hp.nvrtc_register_per_thread.get();
+
+  // Inner reduction domain
+  rparams->cross_block_inner_reduction = true;
+  rparams->block_dim_inner_reduction = ParallelType::TIDx;
+  rparams->pad_inner_reduction_to_warp = true;
+  rparams->batches_per_block_inner_reduction = hp.batches_per_block.get();
+
+  // For persistent schedules always have to mark the reduction unrolled
+  // otherwise rfactor can fail
+  rparams->unroll_factor_inner_reduction = hp.redu_unroll_factor.get();
+  rparams->vectorize_inner_reduction = rparams->unroll_factor_inner_reduction > 1;
+
+  // Iter domain
+  rparams->unroll_factor_iter_dom = hp.iter_unroll_factor.get();
+  rparams->multiple_reds_per_blk = bdimy > 1;
+  if (rparams->multiple_reds_per_blk) {
+    rparams->block_dim_iter_dom = ParallelType::TIDy;
+  }
+  int64_t gdimx = LaunchParams::UNINITIALIZED_VAL;
+  if (hp.godim.get() > 1) {
+    rparams->grid_dim_iter_dom = ParallelType::BIDx;
+    if (hp.godim.get() > scheduler_utils::x_grid_limit) {
+      rparams->split_grid_dim_iter_dom_outer = true;
+      gdimx = scheduler_utils::x_grid_limit;
+    }
+  }
+  
+  rparams->lparams = LaunchParams(
+      gdimx,
+      LaunchParams::UNINITIALIZED_VAL,
+      LaunchParams::UNINITIALIZED_VAL,
+      LaunchParams::UNINITIALIZED_VAL,
+      bdimy,
+      LaunchParams::UNINITIALIZED_VAL);    
+  if (isDebugDumpEnabled(DebugDumpOption::SchedulerDebug)) {
+    debug() << "\n===== Reduction Stats ========\n"
+            << "total_reduction_numel: " << total_reduction_numel << "\n"
+            << "total_iteration_numel: " << total_iteration_numel << "\n"
+            << "vectorize_factor: " << vectorize_factor << "\n"
+            << "n_tensor_inputs: " << n_tensor_inputs << "\n"
+            << "max_input_dtype_size: " << max_input_dtype_size << "\n"
+            << "maxrregcount: " << hp.nvrtc_register_per_thread.get() << "\n"
+            << "estimated_register_count: " << estimated_register_count << "\n"
+            << "register_count_occupancy: " << register_count_occupancy << "\n"
+            << "register_count_minimum: " << register_count_minimum << "\n"
+            << "blocks_per_sm_estimated: " << blocks_per_sm_estimated << "\n"
+            << "blocks_per_sm_wanted: " << blocks_per_sm_wanted << "\n"
+            << "batch_max: " << batch_max << "\n"
+            << "max_persistent_buffer_size: " << max_persistent_buffer_size
+            << std::endl;
+    debug() << rparams->toString() << std::endl;
+  }   
+  return rparams;  
+}
 // Copied from reduction scheduler, should generalize. Simply needed to take out
 // grid reductions.
 std::shared_ptr<ReductionParams> innerPersistentHeuristic(
@@ -345,6 +579,17 @@ std::shared_ptr<ReductionParams> innerPersistentHeuristic(
 
   const int64_t outer_reduction_numel =
       total_reduction_numel / inner_most_dimension_numel;
+
+  if (outer_reduction_numel == 1) {
+    return pureInnerPersistentHeuristic(
+        total_reduction_numel,
+        total_iteration_numel,
+        inner_most_dimension_numel,
+        (int64_t)n_tensor_inputs,
+        (int64_t)max_input_dtype_size,
+        max_persistent_buffer_size,
+        vectorize_factor);
+  }
 
   const auto dev_prop = at::cuda::getCurrentDeviceProperties();
   // WARNING: At some point we may want to generate heuristics for another
