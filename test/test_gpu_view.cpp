@@ -2447,4 +2447,122 @@ TEST_F(NVFuserTest, ReshapeOfReshape_CUDA) {
   TORCH_CHECK(ref.equal(cg_outputs.at(0)));
 }
 
+// small transpose dimension with merge and split
+TEST_F(NVFuserTest, VectorizationViolationIssue675_CUDA) {
+  auto fusion = std::make_unique<Fusion>();
+  FusionGuard fg(fusion.get());
+
+  std::vector<int64_t> shape({2, 2, 65536, 2, 2});
+
+  // group 2 {t0, t1, t2, t3, t4}
+  auto tv0 = makeContigTensor(5);
+  fusion->addInput(tv0);
+
+  auto tv1 = transpose(tv0, 1, 4);
+  auto tv2 = transpose(tv1, 0, 3);
+  // group 0 {t3, t4, t2, t0, t1}
+  fusion->addOutput(tv2);
+
+  // a manual schedule mimicing transpose scheduler.
+  auto tv0_cache = tv0->cacheAfter();
+  tv2->cacheBefore();
+
+  // put group 2 into shared memory
+  tv0_cache->setMemoryType(MemoryType::Shared);
+
+  // virtual inner most setup
+  // {t3, t4, t2/8, 8, t0, t1}
+  tv2->split(2, 8);
+  // merge with inner most
+  tv2->merge(3);
+  tv2->merge(3);
+  // {t3, t4, t2/8, 8*t0*t1}
+  tv2->merge(0, 2);
+  tv2->merge(0);
+  // {t3*(t2/8)*t4, 8*t0*t1}
+
+  // global schedule to form a tile
+  tv2->split(1, 32);
+  tv2->split(0, 32);
+  // {t3*(t2/8)*t4/32, 32(t4), 8*t0*t1/32, 32(t1)}
+  tv2->reorder({{1, -1}});
+  // {t3*(t2/8)*t4/32, 8*t0*t1/32, 32(t1), 32(t4)}
+  tv2->merge(0);
+  tv2->split(0, 1);
+  // {t3*(t2/8)*t4/32*8*t0*t1/32, 1, 32(t1), 32(t4)}
+  tv2->axis(1)->parallelize(ParallelType::Unswitch);
+  tv2->axis(0)->parallelize(ParallelType::BIDx);
+  // {BIDx, Unswitch, tile1, tile2}
+  {
+    MaxRootDomainInfoSpanningTree entire_dag(tv2);
+    TransformPropagator tp(tv2);
+    entire_dag.traverse(&tp);
+    scheduler_utils::parallelizeAllLike(tv2);
+  }
+
+  // schedule group 2
+  // {BIDx, Unswitch, tile1, tile2}
+  tv0->merge(2);
+  tv0->split(2, 4); // split for vectorization
+  tv0->split(2, 128); // split for TIDx
+  // {BIDx, Unswitch, 2, 128, 4}
+  tv0->axis(-1)->parallelize(ParallelType::Vectorize);
+  tv0->axis(-2)->parallelize(ParallelType::TIDx);
+  tv0->axis(-3)->parallelize(ParallelType::Unroll);
+  {
+    auto all_tvs_except1 =
+        ir_utils::allTvsExcept(fusion.get(), {tv2});
+    SetSelector selector({all_tvs_except1.begin(), all_tvs_except1.end()});
+    MaxRootDomainInfoSpanningTree tree(tv0, &selector);
+    TransformPropagator tp(tv0);
+    tree.traverse(&tp);
+    scheduler_utils::parallelizeAllLike(
+        tv0, {tv0, tv0_cache}, {ParallelType::TIDx});
+    scheduler_utils::parallelizeAllLike(
+        tv0,
+        {tv0, tv0_cache},
+        {ParallelType::Vectorize, ParallelType::Unroll});
+  }
+
+  // schedule group 1
+  tv2->reorder({{-2, -1}});
+  // {BIDx, Unswitch, tile2, tile1}
+  tv2->merge(2);
+  tv2->split(2, 4); // split for vectorization
+  tv2->split(2, 128); // split for TIDx
+  // {BIDx, Unswitch, 2, 128, 4}
+  tv2->axis(-1)->parallelize(ParallelType::Vectorize);
+  tv2->axis(-2)->parallelize(ParallelType::TIDx);
+  tv2->axis(-3)->parallelize(ParallelType::Unroll);
+
+  {
+    auto all_tvs_except2 =
+        ir_utils::allTvsExcept(fusion.get(), {tv0, tv0_cache});
+    SetSelector selector({all_tvs_except2.begin(), all_tvs_except2.end()});
+    MaxRootDomainInfoSpanningTree tree(tv2, &selector);
+    TransformPropagator tp(tv2);
+    tree.traverse(&tp);
+    scheduler_utils::parallelizeAllLike(
+        tv2, all_tvs_except2, {ParallelType::TIDx});
+    scheduler_utils::parallelizeAllLike(
+        tv2,
+        {tv2},
+        {ParallelType::Vectorize, ParallelType::Unroll});
+  }
+
+  inlineMost();
+
+  auto options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, 0);
+  auto t0 = at::randn(shape, options);
+  std::vector<c10::IValue> aten_inputs({t0});
+
+  FusionExecutor fe;
+  fe.compileFusion(fusion.get(), aten_inputs);
+  auto cg_outputs = fe.runFusion(aten_inputs);
+
+  auto ref = t0.transpose(1, 4).transpose(0, 3);
+
+  TORCH_CHECK(ref.equal(cg_outputs.at(0)));
+}
+
 } // namespace nvfuser
