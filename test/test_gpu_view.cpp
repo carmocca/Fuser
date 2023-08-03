@@ -2550,6 +2550,9 @@ TEST_F(NVFuserTest, VectorizationViolationIssue675_CUDA) {
         {ParallelType::Vectorize, ParallelType::Unroll});
   }
 
+  for (auto id : tv0->getLeafDomain()) {
+    id->parallelize(ParallelType::Serial);
+  }
   inlineMost();
 
   auto options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, 0);
