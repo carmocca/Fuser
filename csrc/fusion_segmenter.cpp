@@ -3930,6 +3930,7 @@ class ForceHalfAnnotation : public IterVisitor {
     auto dtype = tv->getDataType();
     if (dtype.has_value() && dtype.value() == DataType::Float &&
         !tv->isFusionOutput() && !tv->isFusionInput()) {
+      std::cout << "force_fp16_tv_set add : " << tv->toString() << std::endl;
       force_fp16_tv_set_.insert(tv);
     }
   }
