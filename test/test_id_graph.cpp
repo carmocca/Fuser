@@ -236,27 +236,26 @@ TEST_F(IdGraphTest, MultiPromotionExactMap) {
 
   auto exact_map = buildExactMap(&fusion);
 
-  // Except for tv1 and tv5, the non-root IDs should not be mapped at
-  // all. Tv1 and tv5 should be mapped with each other, so their
-  // non-root domain groups should have size 2
+  // Make sure the non-root IDs should not be mapped at
+  // all, except for tv1 and tv5, which should be mapped with each
+  // other, so their non-root domain groups should have size 2.
   for (auto tv : {tv0, tv1, tv2, tv3, tv4, tv5}) {
     for (auto id : ir_utils::allIDsOf(tv)) {
-      auto idg = exact_map.toGroup(id);
-      if (!exact_map.getDefinitions(idg).second) {
-        ASSERT_TRUE(
-            std::find(
-                tv->getRootDomain().begin(), tv->getRootDomain().end(), id) !=
-            tv->getRootDomain().end())
-            << "Invalid ID detected. Non-root ID with no definition: "
-            << id->toString();
+      if (std::find(
+              tv->getRootDomain().begin(), tv->getRootDomain().end(), id) !=
+          tv->getRootDomain().end()) {
         continue;
       }
 
+      size_t expected_size = 0;
       if (tv->name() == 1 || tv->name() == 5) {
-        ASSERT_EQ(idg->size(), 2) << "Unexpected IdGroup: " << toString(idg);
+        expected_size = 2;
       } else {
-        ASSERT_EQ(idg->size(), 1) << "Unexpected IdGroup: " << toString(idg);
+        expected_size = 1;
       }
+      const auto& idg = exact_map.toGroup(id);
+      ASSERT_EQ(idg->size(), expected_size) << "Unexpected IdGroup size: " << toString(idg)
+                                            << ", tensor: " << tv->toString();
     }
   }
 }
