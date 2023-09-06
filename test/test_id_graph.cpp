@@ -17,6 +17,7 @@
 #include <id_model/to_string.h>
 #include <inlining.h>
 #include <ops/all_ops.h>
+#include <transform_iter.h>
 
 namespace nvfuser {
 
@@ -157,6 +158,83 @@ void buildExactMap(const std::vector<Expr*>& exprs, IdGraph& id_graph) {
   }
 }
 
+void buildPermissiveMap(const std::vector<Expr*>& exprs, IdGraph& id_graph) {
+  buildExactMap(exprs, id_graph);
+
+  for (auto expr : exprs) {
+    // Multiple outputs are already mapped, we can ignore all but the first
+    // consumer given they have to be replayed in the same exact way
+    // Multiple outputs are already mapped, we can ignore all but the first
+    // consumer given they have to be replayed in the same exact way
+    TensorView* c_tv = ir_utils::getTvOutput(expr);
+
+    auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
+
+    for (auto p_tv : tv_inputs) {
+      auto p_ids_vec = ir_utils::allIDsOf(p_tv);
+      auto c_ids_vec = ir_utils::allIDsOf(c_tv);
+      std::unordered_set<IterDomain*> p_ids(p_ids_vec.begin(), p_ids_vec.end());
+      std::unordered_set<IterDomain*> c_ids(c_ids_vec.begin(), c_ids_vec.end());
+
+      ForwardingInfo permissive_forwarding(p_tv, c_tv);
+      for (auto entry : permissive_forwarding.producer_forwarding_map) {
+#if 0
+        std::cerr << "Permissive map 1: " << entry.first->toString()
+                  << ", " << entry.second->toString()
+                  << std::endl;
+#endif
+        id_graph.mapIds(entry.first, entry.second);
+      }
+#if 0
+      // TODO: Should this just get rolled up in the forwarding map now?
+      // TODO: Why should IDs be mapped to their compliments? Is this right?
+      for (auto entry : permissive_forwarding.producer_compliment_map) {
+        for (auto entry_2 : entry.second) {
+          std::cerr << "Permissive map 2: " << entry.first->toString()
+                    << ", " << entry_2->toString()
+                    << std::endl;
+          id_graph.mapIds(entry.first, entry_2);
+        }
+      }
+#endif
+
+      for (auto entry : permissive_forwarding.consumer_forwarding_map) {
+#if 0
+        std::cerr << "Permissive map 3: " << entry.first->toString()
+                  << ", " << entry.second->toString()
+                  << std::endl;
+#endif
+        id_graph.mapIds(entry.first, entry.second);
+      }
+
+#if 0
+      // TODO: Should this just get rolled up in the forwarding map now?
+      // TODO: Why should IDs be mapped to their compliments? Is this right?
+      for (auto entry : permissive_forwarding.consumer_compliment_map) {
+        for (auto entry_2 : entry.second) {
+          std::cerr << "Permissive map 4: " << entry.first->toString()
+                    << ", " << entry_2->toString()
+                    << std::endl;
+          id_graph.mapIds(entry.first, entry_2);
+        }
+      }
+#endif
+      auto permissive_c2p_root_map = PairwiseRootDomainMap(p_tv, c_tv);
+
+      for (auto entry : permissive_c2p_root_map.mapConsumerToProducer(
+               c_tv->domain(), p_tv->domain())) {
+#if 0
+        std::cerr << "Permissive map 5: " << entry.first->toString()
+                  << ", " << entry.second->toString()
+                  << std::endl;
+#endif
+        id_graph.mapIds(entry.first, entry.second);
+      }
+    }
+  }
+  id_graph.mapThroughLoopSwizzles();
+}
+
 // Partially copied from IterDomainGraphs::build for testing IdGraph only
 IdGraph buildExactMap(Fusion* fusion) {
   FusionGuard fg(fusion);
@@ -197,6 +275,49 @@ IdGraph buildExactMap(Fusion* fusion) {
   auto id_graph = initializeIdGraph(true, id_uses, id_definitions);
 
   buildExactMap(tv_exprs, id_graph);
+
+  return id_graph;
+}
+
+IdGraph buildPermissiveMap(Fusion* fusion) {
+  FusionGuard fg(fusion);
+
+  auto exprs = fusion->exprs();
+
+  std::vector<Expr*> tv_exprs;
+
+  std::copy_if(
+      exprs.begin(), exprs.end(), std::back_inserter(tv_exprs), [](Expr* expr) {
+        TORCH_INTERNAL_ASSERT(expr != nullptr);
+        return ir_utils::isTvOp(expr);
+      });
+
+  auto all_tvs = ir_utils::allTvsOfExprs(tv_exprs);
+
+  std::unordered_set<TensorView*> all_added_tvs(all_tvs.begin(), all_tvs.end());
+  for (auto additional_tv :
+       ir_utils::filterByType<TensorView>(fusion->inputs())) {
+    if (all_added_tvs.insert(additional_tv).second) {
+      all_tvs.push_back(additional_tv);
+    }
+  }
+  for (auto additional_tv :
+       ir_utils::filterByType<TensorView>(fusion->outputs())) {
+    if (all_added_tvs.insert(additional_tv).second) {
+      all_tvs.push_back(additional_tv);
+    }
+  }
+
+  if (all_tvs.empty()) {
+    return IdGraph();
+  }
+
+  // Add uses and definitions to all iter domains.
+  auto [id_uses, id_definitions] = buildIterDomainDefinitionsAndUses(all_tvs);
+
+  auto id_graph = initializeIdGraph(true, id_uses, id_definitions);
+
+  buildPermissiveMap(tv_exprs, id_graph);
 
   return id_graph;
 }
@@ -254,8 +375,117 @@ TEST_F(IdGraphTest, MultiPromotionExactMap) {
         expected_size = 1;
       }
       const auto& idg = exact_map.toGroup(id);
-      ASSERT_EQ(idg->size(), expected_size) << "Unexpected IdGroup size: " << toString(idg)
-                                            << ", tensor: " << tv->toString();
+      ASSERT_EQ(idg->size(), expected_size)
+          << "Unexpected IdGroup size: " << toString(idg)
+          << ", tensor: " << tv->toString();
+    }
+  }
+}
+
+// Test the permissive map with a multi-promotion fusion pattern. Promotion
+// should not matter as the exact map is concerned
+TEST_F(IdGraphTest, MultiPromotionPermissiveMap) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  // [y]
+  auto tv0 = makeSymbolicTensor(1);
+  // [w, x, y, z]
+  auto tv1 = makeSymbolicTensor(4);
+  fusion.addInput(tv0);
+  fusion.addInput(tv1);
+
+  // y
+  auto tv2 = broadcast(tv0, {true, false});
+  // w, y
+  auto tv3 = broadcast(tv2, {false, false, true});
+  // w, y, z
+  auto tv4 = broadcast(tv3, {false, true, false, false});
+  // w, x, y, z
+  auto tv5 = add(tv4, tv1);
+
+  fusion.addOutput(tv5);
+
+  tv5->merge(1)->merge(1)->merge(0)->split(0, 11);
+
+  TransformPropagator propagator(tv5);
+  MaxRootDomainInfoSpanningTree(tv5).traverse(&propagator);
+
+  inlineAllAt(tv5, 1);
+
+  auto map = buildPermissiveMap(&fusion);
+
+  const auto& id_sets = map.disjointIdSets().disjointSets();
+
+  // Shouldn't this be 6?
+  ASSERT_EQ(id_sets.size(), 5) << "Unexpected number of disjoint sets";
+
+  for (const auto& id_set : id_sets) {
+    std::unordered_set<IterDomain*> ref_set;
+    // w and x are merged in the current implementation. Is it the
+    // right behavior?
+    if (id_set->has(tv1->getRootDomain().at(0))) { // w
+      if (true) {
+        ref_set = std::unordered_set<IterDomain*>(
+            {tv1->getRootDomain().at(0),
+             tv2->getRootDomain().at(0),
+             tv3->getRootDomain().at(0),
+             tv4->getRootDomain().at(0),
+             tv5->getRootDomain().at(0),
+             tv1->getRootDomain().at(1),
+             tv4->getRootDomain().at(1),
+             tv5->getRootDomain().at(1)});
+      } else {
+        ref_set = std::unordered_set<IterDomain*>(
+            {tv1->getRootDomain().at(0),
+             tv2->getRootDomain().at(0),
+             tv3->getRootDomain().at(0),
+             tv4->getRootDomain().at(0),
+             tv5->getRootDomain().at(0)});
+      }
+    } else if (id_set->has(tv1->getRootDomain().at(1))) { // x
+      ref_set = std::unordered_set<IterDomain*>(
+          {tv1->getRootDomain().at(1),
+           tv4->getRootDomain().at(1),
+           tv5->getRootDomain().at(1)});
+    } else if (id_set->has(tv1->getRootDomain().at(2))) { // y
+      ref_set = std::unordered_set<IterDomain*>(
+          {tv0->getRootDomain().at(0),
+           tv1->getRootDomain().at(2),
+           tv2->getRootDomain().at(1),
+           tv3->getRootDomain().at(1),
+           tv4->getRootDomain().at(2),
+           tv5->getRootDomain().at(2)});
+      // Gather all IDs produced by merge
+      for (auto tv : ir_utils::allTvs(&fusion)) {
+        for (auto id : ir_utils::allIDsOf(tv)) {
+          if (auto merge = dynamic_cast<Merge*>(id->definition())) {
+            ref_set.insert(id);
+          }
+        }
+      }
+    } else if (id_set->has(tv1->getRootDomain().at(3))) { // z
+      ref_set = std::unordered_set<IterDomain*>(
+          {tv1->getRootDomain().at(3),
+           tv3->getRootDomain().at(2),
+           tv4->getRootDomain().at(3),
+           tv5->getRootDomain().at(3)});
+    } else if (id_set->has(tv1->axis(0))) { // leaf outer
+      for (auto tv : ir_utils::allTvs(&fusion)) {
+        ref_set.insert(tv->axis(0));
+      }
+    } else if (id_set->has(tv1->axis(1))) { // leaf inner
+      for (auto tv : ir_utils::allTvs(&fusion)) {
+        ref_set.insert(tv->axis(1));
+      }
+    } else {
+      FAIL() << "Unexpected ID set";
+    }
+
+    const auto& actual_set = id_set->set();
+
+    if (!ref_set.empty()) {
+      ASSERT_EQ(ref_set, actual_set);
     }
   }
 }
