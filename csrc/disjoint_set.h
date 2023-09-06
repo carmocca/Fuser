@@ -475,6 +475,10 @@ class DisjointSets {
     return ss.str();
   }
 
+  auto size() const {
+    return disjoint_sets_.size();
+  }
+
  private:
   // Disjoint sets
   std::unordered_map<T, std::shared_ptr<VectorOfUniqueEntries<T, Hash>>, Hash>
