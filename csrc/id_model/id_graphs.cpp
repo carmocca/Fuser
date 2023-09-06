@@ -680,7 +680,8 @@ void IterDomainGraphs::buildExactMap(const std::vector<Expr*>& exprs) {
       // non-broadcast dimensions. Prevent any broadcasted axes being mapped
       // to non-broadcasted axes.
       auto exact_c2p_root_map =
-          PairwiseRootDomainMap(p_tv, c_tv).mapBroadcast(false)
+          PairwiseRootDomainMap(p_tv, c_tv)
+              .mapBroadcast(false)
               .mapConsumerToProducer(c_tv->domain(), p_tv->domain());
 
       for (auto c_id : getSortedKeys(exact_c2p_root_map, Statement::lessThan)) {
@@ -819,6 +820,7 @@ struct StatefulLoweringInfo {
   // used for deterministic order
   VectorOfUniqueEntries<IterDomain*> ordered_p_ca_ids;
 
+  // TODO-NM: Comment
   std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
       p2c_root_broadcast_resolution_map;
 };
@@ -833,18 +835,18 @@ std::unordered_map<IterDomain*, IterDomain*> resolvedRootBroadcasts(
           .mapProducerToConsumer(producer->domain(), consumer->domain());
 
   std::unordered_map<IterDomain*, IterDomain*> resolved_bcast_map;
-  for (const auto& kv : p2c_map) {
-    auto p_id = kv.first;
-    // Ignore non-broadcast dims
-    if (!p_id->isBroadcast()) {
+  for (const auto& [p_id, c_id] : p2c_map) {
+    // Look for a broadcast producer and non-broadcast consumer
+
+    // Ignore non-broadcast producer and broadcast consumer dims
+    if (!p_id->isBroadcast() || c_id->isBroadcast()) {
       continue;
     }
-    auto c_id = kv.second;
-    // If the consumer ID is a reduction (i.e., a trivial
-    // reduction), do not consider it's concretized.
-    if (c_id->isBroadcast() || c_id->isReduction()) {
-      continue;
-    }
+
+    // Consumer must not be a reduction as trivial reductions should
+    // be replaced with squeeze
+    TORCH_INTERNAL_ASSERT(
+        !c_id->isReduction(), "Unexpected domain: ", c_id->toString());
 
     resolved_bcast_map[p_id] = c_id;
   }
@@ -881,13 +883,12 @@ StatefulLoweringInfo buildInfo(
       for (auto consumer :
            ir_utils::filterByType<TensorView>(expr->outputs())) {
         auto resolved_bcast_map = resolvedRootBroadcasts(producer, consumer);
-        for (auto entry : resolved_bcast_map) {
-          info.p2c_root_broadcast_resolution_map[entry.first].pushBack(
-              entry.second);
-          for (auto other_exact_bcast : *exact_graph.toGroup(entry.first)) {
+        for (const auto& [p_id, c_id] : resolved_bcast_map) {
+          info.p2c_root_broadcast_resolution_map[p_id].pushBack(c_id);
+          for (IterDomain* other_exact_bcast : *exact_graph.toGroup(p_id)) {
             if (all_producer_ca_deps.has(other_exact_bcast)) {
               info.p2c_root_broadcast_resolution_map[other_exact_bcast]
-                  .pushBack(entry.second);
+                  .pushBack(c_id);
             }
           }
         }
@@ -899,8 +900,8 @@ StatefulLoweringInfo buildInfo(
         auto p2c_permissive_map = permissive_graph.buildMapBetween(
             all_producer_ids, all_consumer_ids);
 
-        for (auto entry : p2c_permissive_map) {
-          if (entry.second.size() == 0) {
+        for (const auto& entry : p2c_permissive_map) {
+          if (entry.second.empty()) {
             continue;
           }
           if (all_producer_ca_deps.has(entry.first)) {
@@ -909,8 +910,8 @@ StatefulLoweringInfo buildInfo(
           info.p2c_permissive_maps[entry.first].pushBack(entry.second);
         }
 
-        for (auto entry : p2c_permissive_map) {
-          if (entry.second.size() == 0) {
+        for (const auto& entry : p2c_permissive_map) {
+          if (entry.second.empty()) {
             continue;
           }
           info.p2c_permissive_maps[entry.first].pushBack(entry.second);
@@ -1066,7 +1067,7 @@ IdGraph IterDomainGraphs::buildIntersection(
     const IdGraph& graph1,
     bool propagate_exprs) {
   auto intersection = initializeIdGraph(propagate_exprs);
-  for (auto group0 : graph0.disjointIdSets().disjointSets()) {
+  for (const auto& group0 : graph0.disjointIdSets().disjointSets()) {
     auto set_size = group0->size();
     for (auto id0_i : c10::irange(set_size)) {
       auto id0 = group0->vector()[id0_i];
@@ -1090,11 +1091,11 @@ void IterDomainGraphs::initializeLoopMap(StatefulLoweringInfo& info) {
 
   // Make sure this is called in a deterministic order. Build all inlined
   // relationships in loop graph.
-  for (auto p_id : info.ordered_p_ca_ids) {
+  for (IterDomain* p_id : info.ordered_p_ca_ids) {
     auto entry_it = info.p2c_ca_permissive_maps.find(p_id);
     if (entry_it != info.p2c_ca_permissive_maps.end()) {
-      auto c_ids = entry_it->second;
-      for (auto c_id : c_ids) {
+      const VectorOfUniqueEntries<IterDomain*>& c_ids = entry_it->second;
+      for (IterDomain* c_id : c_ids) {
         idGraph(IdMappingMode::LOOP).mapIds(p_id, c_id);
       }
     }
@@ -1104,7 +1105,7 @@ void IterDomainGraphs::initializeLoopMap(StatefulLoweringInfo& info) {
 std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     buildInlinePromotions(StatefulLoweringInfo& info) {
   // Make an intersection of the exact and loop map. This will group together
-  // entries in each loop group that are exact with eachother. This provides a
+  // entries in each loop group that are exact with each other. This provides a
   // better graph to do promotion and replays.
 
   // It's tempting to use the intersection of the almost exact and loop, but we
@@ -1142,8 +1143,10 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
   // able to modify a broadcast domain between root and rfactor which would be
   // required to resolve a non input broadcast domain. But for now leaving it as
   // traversal on all broadcast groups.
-  for (auto iel_group :
+  for (const auto& iel_group :
        intersection_exact_loop_graph.disjointIdSets().disjointSets()) {
+    TORCH_INTERNAL_ASSERT(!iel_group->empty());
+
     if (!iel_group->front()->isBroadcast()) {
       continue;
     }
