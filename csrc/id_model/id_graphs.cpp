@@ -843,10 +843,13 @@ std::unordered_map<IterDomain*, IterDomain*> resolvedRootBroadcasts(
       continue;
     }
 
-    // Consumer must not be a reduction as trivial reductions should
-    // be replaced with squeeze
-    TORCH_INTERNAL_ASSERT(
-        !c_id->isReduction(), "Unexpected domain: ", c_id->toString());
+    if (c_id->isReduction()) {
+      // This should only happen with expanded broadcast
+      // domains. Otherwise, squeeze should be used
+      TORCH_INTERNAL_ASSERT(
+          p_id->hasExpandedExtent(), "Unexpected domain: ", c_id->toString());
+      continue;
+    }
 
     resolved_bcast_map[p_id] = c_id;
   }
@@ -1017,7 +1020,7 @@ void IterDomainGraphs::build(
 VectorOfUniqueEntries<IterDomain*> IterDomainGraphs::computeTerminalLoopIds(
     const StatefulLoweringInfo info) {
   VectorOfUniqueEntries<IterDomain*> terminal_loop_ids;
-  for (auto group :
+  for (const IdGroup& group :
        idGraph(IdMappingMode::LOOP).disjointIdSets().disjointSets()) {
     if (group->size() == 1) {
       terminal_loop_ids.pushBack(group->front());
@@ -1039,7 +1042,7 @@ VectorOfUniqueEntries<IterDomain*> IterDomainGraphs::computeTerminalLoopIds(
       // If there's an output group that is not in the same group, then it's id
       // consumer terminal. Also if there's no output groups it's id consumer
       // terminal.
-      bool all_outs_in_loop_group = uses_it->second.size() == 0 ? false : true;
+      bool all_outs_in_loop_group = uses_it->second.empty() ? false : true;
       for (auto use : uses_it->second) {
         for (auto out_id : ir_utils::filterByType<IterDomain>(use->outputs())) {
           if (group != idGraph(IdMappingMode::LOOP).toGroup(out_id)) {
@@ -1169,7 +1172,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     // The intersection of the exact groups that the broadcast domains can be
     // broadcasted to, and those that exist within the same loop groop are is
     // the promotion needed for this iel_group.
-    auto loop_exact_resolved_intersection =
+    IdGroups loop_exact_resolved_intersection =
         resolved_exact_groups.intersect(loop_covered_exact_groups);
 
     if (loop_exact_resolved_intersection.empty()) {
@@ -1184,7 +1187,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
           << "Invalid multiple broadcast resolution within shared loops detected, group:\n  "
           << iel_group->toString() << "\nIs being broadcasted to:";
 
-      for (auto entry : loop_exact_resolved_intersection) {
+      for (const IdGroup& entry : loop_exact_resolved_intersection) {
         err_msg << "\n  " << entry->toString();
       }
       TORCH_INTERNAL_ASSERT(false, err_msg.str());
@@ -1198,7 +1201,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     auto promoted_iel_groups =
         intersection_exact_loop_graph.toGroups(resolved_ids);
 
-    if (promoted_iel_groups.size() == 0) {
+    if (promoted_iel_groups.empty()) {
       continue;
     }
 
@@ -1209,7 +1212,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
           << "Invalid multiple broadcast resolution within shared loops detected, group:\n  "
           << iel_group->toString() << "\nIs being broadcasted to:";
 
-      for (auto entry : promoted_iel_groups) {
+      for (const IdGroup& entry : promoted_iel_groups) {
         err_msg << "\n  " << entry->toString();
       }
       TORCH_INTERNAL_ASSERT(false, err_msg.str());
@@ -1218,7 +1221,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     iel_promotion_map[iel_group] = promoted_iel_groups.front()->front();
   }
 
-  for (auto iel_group :
+  for (const auto& iel_group :
        intersection_exact_loop_graph.disjointIdSets().disjointSets()) {
     auto entry_it = iel_promotion_map.find(iel_group);
     if (entry_it == iel_promotion_map.end()) {
@@ -1228,7 +1231,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
 
   IdGraphStmtSort iel_stmt_sort(intersection_exact_loop_graph);
 
-  for (auto iel_expr : iel_stmt_sort.exprs()) {
+  for (const ExprGroup& iel_expr : iel_stmt_sort.exprs()) {
     auto input_groups = intersection_exact_loop_graph.inputGroups(iel_expr);
 
     // Check if any inputs need promotion indicating this expr group needs to
@@ -1236,7 +1239,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     std::vector<IterDomain*> promoted_inputs;
     bool an_input_was_promoted = false;
 
-    for (auto inp : input_groups) {
+    for (const IdGroup& inp : input_groups) {
       auto inp_promo_it = iel_promotion_map.find(inp);
       if (inp_promo_it == iel_promotion_map.end()) {
         promoted_inputs.push_back(inp->front());
@@ -1271,12 +1274,13 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     //
     // TODO: Can we reduce the number of new expressions generated here?
     ExprGroups non_promoted_input_uses;
-    for (auto iel_group : promoted_input_groups.intersect(input_groups)) {
+    for (const IdGroup& iel_group :
+         promoted_input_groups.intersect(input_groups)) {
       non_promoted_input_uses.pushBack(
           intersection_exact_loop_graph.getUniqueUses(iel_group));
     }
 
-    for (auto iel_use_group : non_promoted_input_uses) {
+    for (const ExprGroup& iel_use_group : non_promoted_input_uses) {
       if (IdGraph::transformAtributesMatch(
               iel_expr->front(), iel_use_group->front())) {
         auto use_inps =
@@ -1328,18 +1332,17 @@ std::unordered_map<IdGroup, IterDomain*> updateMap(
     const std::unordered_map<IdGroup, IterDomain*> stale_map,
     IdGraph& new_graph) {
   std::unordered_map<IdGroup, IterDomain*> new_map;
-  for (auto stale_entry : stale_map) {
-    auto stale_id_group = stale_entry.first;
-    auto new_groups = new_graph.toGroups(*stale_id_group);
+  for (const auto& [stale_key, mapped_id] : stale_map) {
+    IdGroups new_groups = new_graph.toGroups(*stale_key);
     TORCH_INTERNAL_ASSERT(
         new_groups.size() == 1,
         "\nUpdate map assumes that new graph is equivalent to old graph plus extra mappings.\n",
         "i.e. all mappings in new_graph should exist in the graph stale_map was produced on.\n",
         "old:",
-        nvfuser::toString(stale_id_group),
+        nvfuser::toString(stale_key),
         "new: ",
         nvfuser::toString(new_groups));
-    new_map[new_groups.front()] = stale_entry.second;
+    new_map[new_groups.front()] = mapped_id;
   }
   return new_map;
 }
@@ -1354,7 +1357,7 @@ std::unordered_map<IdGroup, IdGroups> computeCoveredGroups(
   // covers
   std::unordered_map<IdGroup, IdGroups> covered_ids;
 
-  for (auto id_group : graph.disjointIdSets().disjointSets()) {
+  for (const IdGroup& id_group : graph.disjointIdSets().disjointSets()) {
     // Initialize inputs
     if (graph.getUniqueDefinitions(id_group).empty()) {
       covered_ids[id_group] = {id_group};
@@ -1377,15 +1380,15 @@ std::unordered_map<IdGroup, IdGroups> computeCoveredGroups(
 
   IdGraphStmtSort exact_stmt_sort(graph);
 
-  for (auto exact_expr : exact_stmt_sort.exprs()) {
-    auto input_groups = graph.inputGroups(exact_expr);
+  for (const ExprGroup& exact_expr : exact_stmt_sort.exprs()) {
+    std::vector<IdGroup> input_groups = graph.inputGroups(exact_expr);
 
     IdGroups covered;
-    for (auto inp_group : input_groups) {
+    for (const IdGroup& inp_group : input_groups) {
       covered.pushBack(covered_ids.at(inp_group));
     }
 
-    for (auto output_group : graph.outputGroups(exact_expr)) {
+    for (const IdGroup& output_group : graph.outputGroups(exact_expr)) {
       // Don't overwrite initialized cases due to rfactor markings.
       if (covered_ids.find(output_group) == covered_ids.end()) {
         covered_ids[output_group] = covered;
@@ -1421,7 +1424,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
 
       // Grab all iter domains already in the loop groups for both iter
       // domains.
-      auto loop_groups =
+      IdGroups loop_groups =
           idGraph(IdMappingMode::LOOP)
               .toGroups(VectorOfUniqueEntries<IterDomain*>{p_id, c_id});
 
@@ -1439,7 +1442,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
         continue;
       }
 
-      for (auto loop_group : loop_groups) {
+      for (const IdGroup& loop_group : loop_groups) {
         all_ids_in_groups.pushBack(*loop_group);
       }
 
@@ -1493,7 +1496,8 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
   // TODO: I'm uncertain if we can simply use the iel_promotion_map. Once this
   // system is in use we should test not recomputing the "concrete ids".
 
-  for (auto loop_group : loop_graph_copy.disjointIdSets().disjointSets()) {
+  for (const IdGroup& loop_group :
+       loop_graph_copy.disjointIdSets().disjointSets()) {
     if (loop_group->size() == 1) {
       loop_graph_copy_promotion_map[loop_group] = loop_group->front();
       continue;
@@ -1509,7 +1513,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
       }
 
       // Grab the iel entry
-      auto iel_group = intersection_exact_loop_graph.toGroup(loop_id);
+      const IdGroup& iel_group = intersection_exact_loop_graph.toGroup(loop_id);
 
       auto iel_promo_it = iel_promotion_map.find(iel_group);
       if (iel_promo_it == iel_promotion_map.end()) {
@@ -1530,7 +1534,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
 
     // All exact groups covered by all iter domains in this loop group
     IdGroups loop_group_covered_ids;
-    for (auto exact_group : exact_groups) {
+    for (const IdGroup& exact_group : exact_groups) {
       auto covered_it = exact_covered_ids.find(exact_group);
       TORCH_INTERNAL_ASSERT(covered_it != exact_covered_ids.end());
       loop_group_covered_ids.pushBack(covered_it->second);
@@ -1541,12 +1545,12 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     // Check if any of the candidate Iter Domains we collected cover all the
     // exact groups of loop_group_covered_ids. If so, that's the correct
     // promoted iter domain of this group.
-    for (auto entry : exact_promoted_terminal_ids) {
-      auto terminal_id_group = entry.first;
-      auto terminal_id = entry.second;
+    for (const auto& entry : exact_promoted_terminal_ids) {
+      const IdGroup& terminal_id_group = entry.first;
+      IterDomain* terminal_id = entry.second;
       auto covered_it = exact_covered_ids.find(terminal_id_group);
       TORCH_INTERNAL_ASSERT(covered_it != exact_covered_ids.end());
-      if (loop_group_covered_ids.subtract(covered_it->second).size() == 0) {
+      if (loop_group_covered_ids.subtract(covered_it->second).empty()) {
         loop_promotion_id = terminal_id;
         break;
       }
@@ -1558,15 +1562,16 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
           << "\n ERROR Loop promotion map build. Could not find promotion for loop group:\n  ";
       err_msg << nvfuser::toString(loop_group, 0, true);
       err_msg << "\nnone of the terminal iter domains of this group:\n  ";
-      for (auto entry : exact_promoted_terminal_ids) {
-        auto terminal_id_group = entry.first;
-        auto covered_id_groups = exact_covered_ids.at(terminal_id_group);
+      for (const auto& entry : exact_promoted_terminal_ids) {
+        const IdGroup& terminal_id_group = entry.first;
+        const IdGroups& covered_id_groups =
+            exact_covered_ids.at(terminal_id_group);
         err_msg << "  " << nvfuser::toString(terminal_id_group, 0, true)
                 << " -(covers)-> " << nvfuser::toString(covered_id_groups)
                 << std::endl;
       }
       err_msg << "iter domains in this group cover all id groups:\n";
-      for (auto covered_group : loop_group_covered_ids) {
+      for (const IdGroup& covered_group : loop_group_covered_ids) {
         err_msg << "  " << nvfuser::toString(covered_group, 0, true);
       }
       // TORCH_INTERNAL_ASSERT(false, err_msg.str());
@@ -1575,7 +1580,8 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     }
   }
 
-  for (auto loop_group : loop_graph_copy.disjointIdSets().disjointSets()) {
+  for (const IdGroup& loop_group :
+       loop_graph_copy.disjointIdSets().disjointSets()) {
     if (loop_graph_copy_promotion_map.find(loop_group) !=
         loop_graph_copy_promotion_map.end()) {
     }
@@ -1589,10 +1595,13 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
   // Need to run a replay for the loop groups that are dependent on inlined loop
   // groups, but themselves are not inlined loop groups.
 
-  for (auto iel_expr : IdGraphStmtSort(intersection_exact_loop_graph).exprs()) {
-    auto iel_inp_groups = intersection_exact_loop_graph.inputGroups(iel_expr);
+  for (const ExprGroup& iel_expr :
+       IdGraphStmtSort(intersection_exact_loop_graph).exprs()) {
+    std::vector<IdGroup> iel_inp_groups =
+        intersection_exact_loop_graph.inputGroups(iel_expr);
 
-    auto iel_out_groups = intersection_exact_loop_graph.outputGroups(iel_expr);
+    std::vector<IdGroup> iel_out_groups =
+        intersection_exact_loop_graph.outputGroups(iel_expr);
 
     // When replaying the transformations we can't blindly apply loop promotion
     // to all iter domains within a loop group as it would replay the
@@ -1618,12 +1627,12 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     // the same loop group.
 
     IdGroups inp_loop_groups;
-    for (auto iel_inp_group : iel_inp_groups) {
+    for (const IdGroup& iel_inp_group : iel_inp_groups) {
       inp_loop_groups.pushBack(loop_graph_copy.toGroup(iel_inp_group->front()));
     }
 
     IdGroups out_loop_groups;
-    for (auto iel_out_group : iel_out_groups) {
+    for (const IdGroup& iel_out_group : iel_out_groups) {
       out_loop_groups.pushBack(loop_graph_copy.toGroup(iel_out_group->front()));
     }
 
@@ -1636,14 +1645,15 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     bool an_input_was_promoted = false;
 
     // Promote inputs for replay
-    for (auto iel_inp_group : iel_inp_groups) {
+    for (const IdGroup& iel_inp_group : iel_inp_groups) {
       // Promote loops based on the loop promotion map. If the loop promotion
       // map should be used and has an entry we should use that promotion. This
       // happen when an iel expression is across a loop group boundary.
       // Signifying and capturing instances when we traverse across an inlined
       // loop group to a non-inlined loop group boundary (think of the iel graph
       // projected onto the loop graph).
-      auto loop_copy_group = loop_graph_copy.toGroup(iel_inp_group->front());
+      const IdGroup& loop_copy_group =
+          loop_graph_copy.toGroup(iel_inp_group->front());
       auto inp_loop_promo_it =
           loop_graph_copy_promotion_map.find(loop_copy_group);
       if (loop_promote_inputs &&
@@ -1692,7 +1702,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     }
 
     // Check every use to see if it matches
-    for (auto exact_use_group : promoted_input_uses) {
+    for (const ExprGroup& exact_use_group : promoted_input_uses) {
       // Check if all the attributes (including type) of the transform match
       if (!IdGraph::transformAtributesMatch(
               iel_expr->front(), exact_use_group->front())) {
@@ -1744,7 +1754,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     }
   }
 
-  for (auto group :
+  for (const IdGroup& group :
        intersection_exact_loop_graph.disjointIdSets().disjointSets()) {
     if (iel_promotion_map.find(group) == iel_promotion_map.end()) {
       continue;
