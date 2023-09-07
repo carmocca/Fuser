@@ -885,12 +885,6 @@ StatefulLoweringInfo buildInfo(
         auto resolved_bcast_map = resolvedRootBroadcasts(producer, consumer);
         for (const auto& [p_id, c_id] : resolved_bcast_map) {
           info.p2c_root_broadcast_resolution_map[p_id].pushBack(c_id);
-          for (IterDomain* other_exact_bcast : *exact_graph.toGroup(p_id)) {
-            if (all_producer_ca_deps.has(other_exact_bcast)) {
-              info.p2c_root_broadcast_resolution_map[other_exact_bcast]
-                  .pushBack(c_id);
-            }
-          }
         }
 
         auto all_producer_ids = ir_utils::allIDsOf(producer);
