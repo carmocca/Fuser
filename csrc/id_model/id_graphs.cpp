@@ -1125,7 +1125,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
   // smaller groups and this algorithm scales with the number of groups *
   // (number of entries in groups ^ 2)
 
-  auto intersection_exact_loop_graph = buildIntersection(
+  IdGraph intersection_exact_loop_graph = buildIntersection(
       idGraph(IdMappingMode::EXACT), idGraph(IdMappingMode::LOOP), false);
 
   // Promotion logic is going to be on the intersection of the exact and loop
@@ -1140,7 +1140,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
   // able to modify a broadcast domain between root and rfactor which would be
   // required to resolve a non input broadcast domain. But for now leaving it as
   // traversal on all broadcast groups.
-  for (const auto& iel_group :
+  for (const IdGroup& iel_group :
        intersection_exact_loop_graph.disjointIdSets().disjointSets()) {
     TORCH_INTERNAL_ASSERT(!iel_group->empty());
 
@@ -1150,18 +1150,15 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
 
     // Collect all the exact groups of the resolutions of the broadcast id's
     IdGroups resolved_exact_groups;
-    for (auto bcast_id : *iel_group) {
-      auto p2c_root_broadcast_resolution_map_it =
-          info.p2c_root_broadcast_resolution_map.find(bcast_id);
-
-      if (p2c_root_broadcast_resolution_map_it ==
+    for (IterDomain* bcast_id : *iel_group) {
+      if (auto p2c_root_broadcast_resolution_map_it =
+              info.p2c_root_broadcast_resolution_map.find(bcast_id);
+          p2c_root_broadcast_resolution_map_it !=
           info.p2c_root_broadcast_resolution_map.end()) {
-        continue;
+        resolved_exact_groups.pushBack(
+            idGraph(IdMappingMode::EXACT)
+                .toGroups(p2c_root_broadcast_resolution_map_it->second));
       }
-
-      resolved_exact_groups.pushBack(
-          idGraph(IdMappingMode::EXACT)
-              .toGroups(p2c_root_broadcast_resolution_map_it->second));
     }
 
     // Collect all the exact groups in the loop set containing this iel_group
@@ -1194,7 +1191,39 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     }
 
     // loop_exact_resolved_intersection.size() must be 1 at this point
-    auto exact_resolution_group = loop_exact_resolved_intersection.front();
+    IdGroup exact_resolution_group = loop_exact_resolved_intersection.front();
+
+    // TODO-NM
+    {
+      TORCH_INTERNAL_ASSERT(resolved_exact_groups.size() == 1);
+      TORCH_INTERNAL_ASSERT(
+          resolved_exact_groups.front()->set() ==
+          exact_resolution_group->set());
+    }
+
+    // TODO-NM: This should be equivalent
+    {
+      IdGroups loop_mapped_resolved_exact_groups;
+      for (IterDomain* bcast_id : *iel_group) {
+        if (auto p2c_root_broadcast_resolution_map_it =
+                info.p2c_root_broadcast_resolution_map.find(bcast_id);
+            p2c_root_broadcast_resolution_map_it !=
+            info.p2c_root_broadcast_resolution_map.end()) {
+          auto idg = p2c_root_broadcast_resolution_map_it->second;
+          for (IterDomain* resolution_id : idg) {
+            if (idGraph(IdMappingMode::LOOP)
+                    .disjointIdSets()
+                    .strictAreMapped(bcast_id, resolution_id)) {
+              loop_mapped_resolved_exact_groups.pushBack(
+                  idGraph(IdMappingMode::EXACT).toGroup(resolution_id));
+            }
+          }
+        }
+      }
+      TORCH_INTERNAL_ASSERT(loop_mapped_resolved_exact_groups.size() == 1);
+      TORCH_INTERNAL_ASSERT(
+          loop_mapped_resolved_exact_groups.front() == exact_resolution_group);
+    }
 
     VectorOfUniqueEntries<IterDomain*> resolved_ids =
         exact_resolution_group->intersect(*loop_group);
@@ -1216,6 +1245,11 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
         err_msg << "\n  " << entry->toString();
       }
       TORCH_INTERNAL_ASSERT(false, err_msg.str());
+    }
+
+    {
+      TORCH_INTERNAL_ASSERT(
+          promoted_iel_groups.front()->set() == resolved_ids.set());
     }
 
     iel_promotion_map[iel_group] = promoted_iel_groups.front()->front();
