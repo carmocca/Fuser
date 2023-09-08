@@ -23,6 +23,15 @@ namespace nvfuser {
 // traveled to simply visit all IdGroups in order. See ExprsBetween to see how
 // we might minimize paths.
 class TORCH_CUDA_CU_API IdGraphVisitor {
+ public:
+  IdGraphVisitor() = delete;
+
+  IdGraphVisitor& operator=(const IdGraphVisitor& other) = delete;
+
+  IdGraphVisitor& operator=(IdGraphVisitor&& other) = delete;
+
+  virtual ~IdGraphVisitor() = default;
+
  protected:
   // If sub_selection is assumed to be a set of iter domains by which form a
   // sub-regrion of the IdGraph provided. Only that sub-region will be visited.
@@ -30,6 +39,10 @@ class TORCH_CUDA_CU_API IdGraphVisitor {
       const IdGraph& id_graph,
       const VectorOfUniqueEntries<IterDomain*> sub_selection = {})
       : id_graph_(id_graph), sub_selection_(sub_selection) {}
+
+  IdGraphVisitor(const IdGraphVisitor& other) = default;
+
+  IdGraphVisitor(IdGraphVisitor&& other) = default;
 
   virtual void handle(IdGroup id_group) = 0;
   virtual void handle(ExprGroup expr_group) = 0;
@@ -39,16 +52,6 @@ class TORCH_CUDA_CU_API IdGraphVisitor {
   const IdGraph& graph() {
     return id_graph_;
   };
-
-  IdGraphVisitor() = delete;
-
-  IdGraphVisitor(const IdGraphVisitor& other) = default;
-  IdGraphVisitor& operator=(const IdGraphVisitor& other) = delete;
-
-  IdGraphVisitor(IdGraphVisitor&& other) = default;
-  IdGraphVisitor& operator=(IdGraphVisitor&& other) = delete;
-
-  virtual ~IdGraphVisitor() = default;
 
  private:
   const IdGraph& id_graph_;
