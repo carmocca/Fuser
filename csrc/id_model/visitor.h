@@ -68,12 +68,14 @@ class IdGraphStmtSort : public IdGraphVisitor {
     IdGraphVisitor::traverse();
   }
 
-  ExprGroups exprs() {
-    return sorted_exprs;
+  // Return non-reference so that code like below can work
+  // for (auto expr_group: IdGraphStmtSort(graph).exprs())
+  ExprGroups exprs() const {
+    return sorted_exprs_;
   }
 
-  IdGroups ids() {
-    return sorted_ids;
+  IdGroups ids() const {
+    return sorted_ids_;
   }
 
   ~IdGraphStmtSort() override = default;
@@ -81,15 +83,15 @@ class IdGraphStmtSort : public IdGraphVisitor {
  protected:
   using IdGraphVisitor::handle;
   void handle(IdGroup id_group) override {
-    sorted_ids.pushBack(id_group);
+    sorted_ids_.pushBack(id_group);
   }
 
   void handle(ExprGroup expr_group) override {
-    sorted_exprs.pushBack(expr_group);
+    sorted_exprs_.pushBack(expr_group);
   }
 
-  ExprGroups sorted_exprs;
-  IdGroups sorted_ids;
+  ExprGroups sorted_exprs_;
+  IdGroups sorted_ids_;
 };
 
 } // namespace nvfuser

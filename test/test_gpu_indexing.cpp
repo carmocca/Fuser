@@ -50,6 +50,8 @@ TEST_F(NVFuserTest, FusionIndexing1_CUDA) {
 
   tv2->computeAt(tv4, 1);
 
+  fusion.print();
+
   tv4->axis(0)->parallelize(ParallelType::BIDx);
   tv4->axis(1)->parallelize(ParallelType::Unroll);
   tv4->axis(2)->parallelize(ParallelType::TIDx);
