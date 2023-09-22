@@ -10,6 +10,7 @@
 
 #include <compute_at_map.h>
 #include <executor.h>
+#include <id_model/id_graphs.h>
 #include <inlining.h>
 #include <ir/all_nodes.h>
 #include <ir/builder.h>
@@ -878,8 +879,10 @@ TEST_F(NVFuserTest, FusionIndexing19_CUDA) {
     tensor->inlineAt(1);
   }
 
-  fusion.print();
-  fusion.printKernel();
+  IterDomainGraphs test(&fusion);  
+
+  // The current ComputeAtMap fails with this fusion
+  //fusion.printKernel();
 }
 
 // TODO: Finish and enable test
@@ -1108,6 +1111,27 @@ TEST_F(NVFuserTest, FusionIndexSplitMerge_CUDA) {
 
   testValidate(
       &fusion, cg_outputs, aten_inputs, {aten_output}, __LINE__, __FILE__);
+}
+
+TEST_F(NVFuserTest, TMP) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeSymbolicTensor(1);
+  fusion.addInput(tv0);
+
+  auto tv1 = broadcast(tv0, {false, true});
+  auto tv2 = broadcast(tv0, {false, true});  
+  fusion.addOutput(tv1);
+  fusion.addOutput(tv2);  
+
+  tv1->merge(0);
+  tv2->merge(0);  
+
+  IterDomainGraphs test(&fusion);  
+
+  // The current ComputeAtMap fails with this fusion
+  //fusion.printKernel();
 }
 
 } // namespace nvfuser

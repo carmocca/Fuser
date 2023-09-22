@@ -912,6 +912,7 @@ void IdGraph::mapThroughTrivialExprs() {
     // Map through trivial expressions
     for (auto mapped_id_group : mapped_ids) {
       for (auto id : mapped_id_group) {
+        std::cerr << "Map trivial: " << mapped_id_group.front()->name() << ", " << id->name() << std::endl;
         mapIds(mapped_id_group.front(), id);
       }
     }

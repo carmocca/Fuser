@@ -250,7 +250,7 @@ class TORCH_CUDA_CU_API IterDomainGraphs : public PolymorphicBase {
   std::unordered_map<IdGroup, IterDomain*> buildLoopPromotionMap(
       const std::vector<Expr*>& exprs,
       StatefulLoweringInfo& info,
-      std::unordered_map<IdGroup, IterDomain*> stale_promotion_map);
+      const std::unordered_map<IdGroup, IterDomain*>& stale_promotion_map);
 
   // Builds idGraph(IdMappingMode::INDEX) and returns the iter domain promotion
   // map to go from leaf domains of each (consumer only?) tensor to their
