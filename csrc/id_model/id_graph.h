@@ -16,6 +16,18 @@
 
 namespace nvfuser {
 
+inline std::ostream& verbose(int line) {
+  return std::cerr << "[DEBUG@" << line << "] ";
+}
+
+inline std::ostream& warn(int line) {
+  return std::cerr << "[WARN@" << line << "] ";
+}
+
+#define VERBOSE() verbose(__LINE__)
+#define WARN() warn(__LINE__)
+
+
 using IdGroup = std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>;
 using IdGroups = VectorOfUniqueEntries<IdGroup>;
 using ExprGroup = std::shared_ptr<VectorOfUniqueEntries<Expr*>>;

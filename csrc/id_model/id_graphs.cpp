@@ -21,21 +21,6 @@
 #include <tuple>
 #include <typeinfo>
 
-namespace {
-
-std::ostream& verbose(int line) {
-  return std::cerr << "[DEBUG@" << line << "] ";
-}
-
-std::ostream& warn(int line) {
-  return std::cerr << "[WARN@" << line << "] ";
-}
-
-} // namespace
-
-#define VERBOSE() verbose(__LINE__)
-#define WARN() warn(__LINE__)
-
 namespace nvfuser {
 
 void IterDomainGraphs::assertNoSelfMapping() {
@@ -697,7 +682,7 @@ void IterDomainGraphs::buildExactMap(const std::vector<Expr*>& exprs) {
       // to non-broadcasted axes.
       auto exact_c2p_root_map =
           PairwiseRootDomainMap(p_tv, c_tv)
-              .mapBroadcast(false)
+          .mapBroadcast(getenv("EXACT_MAP_BC"))
               .mapConsumerToProducer(c_tv->domain(), p_tv->domain());
 
       for (auto c_id : getSortedKeys(exact_c2p_root_map, Statement::lessThan)) {
@@ -711,15 +696,16 @@ void IterDomainGraphs::buildExactMap(const std::vector<Expr*>& exprs) {
 }
 
 void IterDomainGraphs::buildPermissiveMap(const std::vector<Expr*>& exprs) {
+  VERBOSE() << "buildPermissiveMap\n";
   if (getenv("PERMISSIVE_ALMOST_EXACT")) {
     idGraph(IdMappingMode::PERMISSIVE) = idGraph(IdMappingMode::ALMOSTEXACT);
   } else {
     idGraph(IdMappingMode::PERMISSIVE) = idGraph(IdMappingMode::EXACT);
   }
-  if (getenv("PERMISSIVE_PROP")) {
-    idGraph(IdMappingMode::PERMISSIVE).setPropagateThroughExprs(true);
-  } else {
+  if (getenv("NO_PERMISSIVE_PROP")) {
     idGraph(IdMappingMode::PERMISSIVE).setPropagateThroughExprs(false);
+  } else {
+    idGraph(IdMappingMode::PERMISSIVE).setPropagateThroughExprs(true);
   }
 
   for (auto expr : exprs) {

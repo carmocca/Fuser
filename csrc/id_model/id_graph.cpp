@@ -662,17 +662,27 @@ bool IdGraph::exprsMap(Expr* first, Expr* second, bool forward) const {
     auto extent_1o = merge1->outer()->extent();
     auto extent_1i = merge1->inner()->extent();
 
-    auto extent_0_match = extent_0o->sameAs(extent_1o) ||
+    auto extent_o_match = extent_0o->sameAs(extent_1o) ||
         (extent_0o->isConstInt() && extent_1o->isConstInt() &&
          extent_0o->evaluateInt() == extent_1o->evaluateInt()) ||
         disjointIdSets().permissiveAreMapped(merge0->outer(), merge1->outer());
 
-    auto extent_1_match = extent_0i->sameAs(extent_1i) ||
+    auto extent_i_match = extent_0i->sameAs(extent_1i) ||
         (extent_0i->isConstInt() && extent_1i->isConstInt() &&
          extent_0i->evaluateInt() == extent_1i->evaluateInt()) ||
         disjointIdSets().permissiveAreMapped(merge0->inner(), merge1->inner());
 
-    if (!(extent_0_match || extent_1_match)) {
+    if (!(extent_o_match || extent_i_match)) {
+      return false;
+    }
+
+    // TODO-NM
+    if (extent_o_match &&
+        disjointIdSets().permissiveAreMapped(merge0->out(), merge0->outer())) {
+      return false;
+    }
+    if (extent_i_match &&
+        disjointIdSets().permissiveAreMapped(merge0->out(), merge0->inner())) {
       return false;
     }
   }
@@ -786,6 +796,12 @@ void IdGraph::maybeMapThroughExprs(Expr* expr0, Expr* expr1, bool forward) {
   // Expr inputs are mapped. If propagate_exprs_ is true, map the
   // exprs and outputs
   if (propagate_through_exprs_) {
+#if 0
+    VERBOSE() << "propagate through (" << forward << "): "
+              << expr0->toString()
+              << expr1->toString()
+              << std::endl;
+#endif
     mapExprs(expr0, expr1);
     mapThroughExpr(expr0, expr1, forward);
   } else if (
