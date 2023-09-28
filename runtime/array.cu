@@ -187,8 +187,32 @@ __device__ void loadGlobalToLocal(
   switch (sizeof(scalar_t) * vec_size) {
     case 1:
     case 2:
-    case 4:
       loadGenericVolatile<scalar_t, vec_size, false, is_volatile>(to, from);
+      break;
+    case 4:
+      if (is_volatile) {
+        asm volatile("ld.volatile.global.s32 %0, [%1];"
+                     : "=r"(*(unsigned int*)to)
+                     : "l"((unsigned int*)from));
+      } else {
+        switch (cache_op) {
+          case CacheOp::AllLevels:
+            asm volatile("ld.global.ca.s32 %0, [%1];"
+                         : "=r"(*(unsigned int*)to)
+                         : "l"((unsigned int*)from));
+            break;
+          case CacheOp::Streaming:
+            asm volatile("ld.global.cs.s32 %0, [%1];"
+                         : "=r"(*(unsigned int*)to)
+                         : "l"((unsigned int*)from));
+            break;
+          case CacheOp::Global:
+            asm volatile("ld.global.cg.s32 %0, [%1];"
+                         : "=r"(*(unsigned int*)to)
+                         : "l"((unsigned int*)from));
+            break;
+        }
+      }
       break;
     case 8: {
       if (is_volatile) {
