@@ -27,7 +27,6 @@ inline std::ostream& warn(int line) {
 #define VERBOSE() verbose(__LINE__)
 #define WARN() warn(__LINE__)
 
-
 using IdGroup = std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>;
 using IdGroups = VectorOfUniqueEntries<IdGroup>;
 using ExprGroup = std::shared_ptr<VectorOfUniqueEntries<Expr*>>;
