@@ -733,9 +733,13 @@ void IterDomainGraphs::buildPermissiveMap(const std::vector<Expr*>& exprs) {
       if (!getenv("NO_MAP_COMPLIMENT")) {
         // TODO: Should this just get rolled up in the forwarding map now?
         // TODO: Why should IDs be mapped to their compliments? Is this right?
-        for (const auto& entry : permissive_forwarding.producer_compliment_map) {
+        for (const auto& entry :
+             permissive_forwarding.producer_compliment_map) {
           for (auto entry_2 : entry.second) {
             idGraph(IdMappingMode::PERMISSIVE).mapIds(entry.first, entry_2);
+            VERBOSE() << "Permissive map producer compliment: "
+                      << entry.first->name() << ", " << entry_2->name()
+                      << std::endl;
           }
         }
       }
@@ -749,9 +753,13 @@ void IterDomainGraphs::buildPermissiveMap(const std::vector<Expr*>& exprs) {
       if (!getenv("NO_MAP_COMPLIMENT")) {
         // TODO: Should this just get rolled up in the forwarding map now?
         // TODO: Why should IDs be mapped to their compliments? Is this right?
-        for (const auto& entry : permissive_forwarding.consumer_compliment_map) {
+        for (const auto& entry :
+             permissive_forwarding.consumer_compliment_map) {
           for (auto entry_2 : entry.second) {
             idGraph(IdMappingMode::PERMISSIVE).mapIds(entry.first, entry_2);
+            VERBOSE() << "Permissive map consumer compliment: "
+                      << entry.first->name() << ", " << entry_2->name()
+                      << std::endl;
           }
         }
       }
@@ -1164,10 +1172,7 @@ void IterDomainGraphs::initializeLoopMap(StatefulLoweringInfo& info) {
       return false;
     }
 
-    bool debug =
-        std::find_if(idg->vector().begin(), idg->vector().end(), [](auto id) {
-          return id->name() == 29;
-        }) != idg->vector().end();
+    bool debug = false;
 
     if (debug) {
       VERBOSE() << "Back-prop visit: " << nvfuser::toString(idg) << std::endl;
@@ -1232,6 +1237,11 @@ void IterDomainGraphs::initializeLoopMap(StatefulLoweringInfo& info) {
                         << id_j->name() << std::endl;
             }
             continue;
+          }
+          // TODO-NM: Now that compliments are mapped, I don't think
+          // this would hit:
+          if (!getenv("NO_MAP_COMPLIMENT")) {
+            TORCH_INTERNAL_ASSERT(false);
           }
           VERBOSE() << "Back-prop loop map: " << id_i->name() << ", "
                     << id_j->name() << std::endl;
@@ -1802,7 +1812,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
       // If there's no broadcast promotion within the loop group then all the
       // iter domains will be almost exact mapped with each other.
       if (ae_groups.size() == 1) {
-        // TODO-NM: Is this safe? p_id and c_id are not sharing the
+        // TODO-NM: Why is this? p_id and c_id are not sharing the
         // same loop
         if (getenv("LOOP_MAP_EXT")) {
           idGraph(IdMappingMode::LOOP).mapIds(p_id, c_id);
@@ -1858,7 +1868,7 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
       continue;
     }
 
-    VERBOSE() << "Visiting loop group: " << nvfuser::toString(loop_group)
+    VERBOSE() << "Visit loop group: " << nvfuser::toString(loop_group)
               << std::endl;
 
     // Grab all the (potentially promoted) terminal iter domains in this group.
@@ -1943,6 +1953,8 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
     // except for the final one would be loop mapped. However, none of
     // the tensors would have the complete loop structure. See, for
     // example, Indexing19.
+    //
+    // update: no longer the case with the compliment mapping?
     if (loop_promotion_id == nullptr) {
       std::stringstream err_msg;
       err_msg
@@ -1961,9 +1973,9 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
       for (const IdGroup& covered_group : loop_group_covered_ids) {
         err_msg << "  " << nvfuser::toString(covered_group, 0, true);
       }
-      VERBOSE() << "No promotion found for " << nvfuser::toString(loop_group)
-                << std::endl;
-      // TORCH_INTERNAL_ASSERT(false, err_msg.str());
+      WARN() << "No promotion found for " << nvfuser::toString(loop_group)
+             << std::endl;
+      TORCH_INTERNAL_ASSERT(false, err_msg.str());
     } else {
       loop_graph_copy_promotion_map[loop_group] = loop_promotion_id;
       VERBOSE() << "loop promotion map: "
@@ -2021,6 +2033,8 @@ std::unordered_map<IdGroup, IterDomain*> IterDomainGraphs::
   // graph? Can a single loop group have two different promotions?
 
   // TODO-NM: Non-determinstic order?
+  //
+  // TODO-NM: Can this traversal be changed to loop groups?
   for (const ExprGroup& iel_expr :
        IdGraphStmtSort(intersection_exact_loop_graph).exprs()) {
     TORCH_INTERNAL_ASSERT(!iel_expr->empty());
